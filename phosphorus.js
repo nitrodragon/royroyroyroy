@@ -1191,6 +1191,9 @@ var P = (function() {
   var collisionCanvas = document.createElement('canvas');
   var collisionContext = collisionCanvas.getContext('2d');
 
+  var collisionCanvas2 = document.createElement('canvas');
+  var collisionContext2 = collisionCanvas2.getContext('2d');
+
   Sprite.prototype.touching = function(thing) {
     var costume = this.costumes[this.currentCostumeIndex];
 
@@ -1250,24 +1253,31 @@ var P = (function() {
 
   Sprite.prototype.touchingColor = function(rgb) {
     var b = this.rotatedBounds();
-    collisionCanvas.width = b.right - b.left;
-    collisionCanvas.height = b.top - b.bottom;
+    var w = b.right - b.left;
+    var h = b.top - b.bottom;
 
-    collisionContext.save();
+    collisionCanvas.width = w;
+    collisionCanvas.height = h;
     collisionContext.translate(-(240 + b.left), -(180 - b.top));
 
     this.stage.drawOn(collisionContext, this);
-    collisionContext.globalCompositeOperation = 'destination-in';
-    this.draw(collisionContext);
 
-    collisionContext.restore();
+    collisionCanvas2.width = w;
+    collisionCanvas2.height = h;
+    collisionContext2.translate(-(240 + b.left), -(180 - b.top));
 
-    var data = collisionContext.getImageData(0, 0, b.right - b.left, b.top - b.bottom).data;
+    this.draw(collisionContext2);
+
+    var data = collisionContext.getImageData(0, 0, w, h).data;
+    var data2 = collisionContext2.getImageData(0, 0, w, h).data;
 
     rgb = rgb & 0xffffff;
-    var length = (b.right - b.left) * (b.top - b.bottom) * 4;
+    var r = rgb >> 16;
+    var g = rgb / 256 & 0xff;
+    var b = rgb & 0xff;
+    var length = w * h * 4;
     for (var i = 0; i < length; i += 4) {
-      if ((data[i] << 16 | data[i + 1] << 8 | data[i + 2]) === rgb) {
+      if (data2[i + 3] && data[i] === r && data[i + 1] === g && data[i + 2] === b) {
         return true;
       }
     }
