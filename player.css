@@ -1,0 +1,66 @@
+.controls {
+  height: 32px;
+}
+.controls span,
+.project-link {
+  width: 32px;
+  height: 32px;
+  float: right;
+  cursor: pointer;
+  text-align: center;
+  opacity: .4;
+  background-image: url(icons.svg);
+  text-decoration: none;
+}
+.controls .title {
+  float: left;
+  color: rgba(0, 0, 0, .4);
+  font: 16px/32px Helvetica Neue, Helvetica, Arial, sans-serif;
+  padding: 0 8px;
+}
+.controls .stop {
+  background-position: -96px 0;
+}
+.controls .pause {
+  background-position: -32px 0;
+}
+.controls .play {
+  background-position: -64px 0;
+}
+.controls .step-out {
+  background-position: -320px 0;
+}
+.controls .step-into {
+  background-position: -352px 0;
+}
+.controls .step-over {
+  background-position: -384px 0;
+}
+.controls .full-screen {
+  float: left;
+  background-position: -128px 0;
+}
+.controls .divider {
+  margin: 8px;
+  width: 1px;
+  height: 16px;
+  background: rgba(0, 0, 0, .2);
+  float: right;
+}
+.controls span:active,
+.project-link:active {
+  opacity: 1 !important;
+}
+.controls .turbo {
+  float: right;
+  display: none;
+  cursor: default;
+  color: rgba(0, 0, 0, .4);
+  font: 500 12px/32px Helvetica Neue, Helvetica, Arial, sans-serif;
+  padding: 0 8px;
+}
+.player {
+  width: 480px;
+  height: 360px;
+  position: relative;
+}

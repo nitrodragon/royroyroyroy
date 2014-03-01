@@ -1,0 +1,713 @@
+<!doctype html>
+<meta charset=utf-8>
+<meta name=viewport content="width=device-width, initial-scale=1.0">
+<title>Loading &middot; phosphorus debugger</title>
+<link rel=stylesheet href=player.css>
+<link rel=stylesheet href=debug.css>
+<div class=stage-pane style=display:none>
+  <div class=controls>
+    <div class=title>Loading&hellip;</div>
+    <span class=stop></span>
+    <span class=pause></span>
+    <span class=flag></span>
+    <div class=divider></div>
+    <span class=step-out title="Step out (o)"></span>
+    <span class=step-into title="Step into (i)"></span>
+    <span class=step-over title="Step over (s)"></span>
+    <div class=turbo>Turbo Mode</div>
+  </div>
+  <div class=player></div>
+  <div class=sprite-list></div>
+</div>
+<div class=script-pane></div>
+<!-- <div class=debug-pane></div> -->
+<script src=lib/jszip/jszip.js></script>
+<script src=lib/jszip/jszip-deflate.js></script>
+<script src=lib/jszip/jszip-inflate.js></script>
+<script src=lib/jszip/jszip-load.js></script>
+<script src=//canvg.googlecode.com/svn/trunk/rgbcolor.js></script>
+<script src=//canvg.googlecode.com/svn/trunk/StackBlur.js></script>
+<script src=//canvg.googlecode.com/svn/trunk/canvg.js></script>
+<script src=phosphorus.js></script>
+<script>
+
+(function() {
+  'use strict';
+
+  var stage;
+
+  var prefix = 'http://scratch.mit.edu/projects/';
+  var defaultId = '17088932';
+
+  var projectId = location.search ? location.search.substr(1) : defaultId;
+  var projectTitle;
+  var projectURL;
+
+  var player = document.querySelector('.player');
+  var controls = document.querySelector('.controls');
+  var title = document.querySelector('.title');
+  var stepOut = document.querySelector('.step-out');
+  var stepInto = document.querySelector('.step-into');
+  var stepOver = document.querySelector('.step-over');
+  var flag = document.querySelector('.flag');
+  var pause = document.querySelector('.pause');
+  var stop = document.querySelector('.stop');
+
+  var scriptPane = document.querySelector('.script-pane');
+
+  var flagTouchTimeout;
+  function flagTouchStart() {
+    flagTouchTimeout = setTimeout(function() {
+      turboClick();
+      flagTouchTimeout = true;
+    }, 500);
+  }
+  function turboClick() {
+    stage.isTurbo = !stage.isTurbo;
+    flag.title = stage.isTurbo ? 'Turbo mode enabled. Shift+click to disable.' : 'Shift+click to enable turbo mode.';
+    turbo.style.display = stage.isTurbo ? 'block' : 'none';
+  }
+  function flagClick(e) {
+    if (flagTouchTimeout === true) return;
+    if (flagTouchTimeout) {
+      clearTimeout(flagTouchTimeout);
+    }
+    if (e.shiftKey) {
+      turboClick();
+    } else {
+      pause.className = 'pause';
+      stage.stopAll();
+      stage.triggerGreenFlag();
+    }
+    stage.focus();
+    e.preventDefault();
+  }
+
+  function pauseClick(e) {
+    if (stage.isRunning) {
+      // TODO
+      pause.className = 'play';
+    } else {
+      pause.className = 'pause';
+    }
+    stage.focus();
+    e.preventDefault();
+  }
+
+  function stopClick(e) {
+    pause.className = 'pause';
+    stage.stopAll();
+    stage.focus();
+    e.preventDefault();
+  }
+
+  function preventDefault(e) {
+    e.preventDefault();
+  }
+
+  if (P.hasTouchEvents) {
+    flag.addEventListener('touchstart', flagTouchStart);
+    flag.addEventListener('touchend', flagClick);
+    pause.addEventListener('touchend', pauseClick);
+    stop.addEventListener('touchend', stopClick);
+
+    flag.addEventListener('touchstart', preventDefault);
+    pause.addEventListener('touchstart', preventDefault);
+    stop.addEventListener('touchstart', preventDefault);
+  } else {
+    flag.addEventListener('click', flagClick);
+    pause.addEventListener('click', pauseClick);
+    stop.addEventListener('click', stopClick);
+  }
+
+  function setTitle(t) {
+    projectTitle = t;
+    title.textContent = t;
+    document.title = t + ' \xb7 phosphorus debugger';
+  }
+
+  function hex(n) {
+    var s = (n & 0xffffff).toString(16);
+    return '#' + '000000'.slice(s.length) + s;
+  }
+
+  function Script(tuple, inline) {
+    if (!inline) {
+      this.x = tuple[0];
+      this.y = tuple[1];
+    }
+    this.blocks = ((inline ? tuple : tuple[2]) || []).map(function(t) {
+      return new Block(t, ' ');
+    });
+
+    var el = this.el = document.createElement('div');
+    el.className = 'script' + (inline ? ' inline' : '');
+    if (!inline) {
+      el.style.left = this.x + 'px';
+      el.style.top = this.y + 'px';
+    }
+    this.blocks.forEach(function(b) {
+      el.appendChild(b.el);
+    });
+  }
+
+  function parseLabel(label) {
+    return (''+label).split(/(%\w*(?:\.\w+)?|@\w*)/g).filter(function(p) {
+      return p.trim();
+    });
+  }
+
+  function Block(tuple, typeHint) {
+    this.selector = tuple[0];
+
+    var spec =
+      this.selector === GET_VAR ? [''+tuple[1], 'r', 9] :
+      this.selector === GET_LIST ? [''+tuple[1], 'r', 12] :
+      this.selector === GET_PARAM ? [''+tuple[1], tuple[2] === 'b' ? 'b' : 'r', 11] :
+      this.selector === PROCEDURE_DEF ? ['define %_p', 'ph', 10] :
+      this.selector === CALL ? [''+tuple[1], ' ', 10] :
+      null;
+    if (!spec) {
+      for (var i = 0; i < blockSpecs.length; i++) {
+        if (blockSpecs[i][3] === this.selector) {
+          spec = blockSpecs[i];
+          break;
+        }
+      }
+    }
+    if (!spec) {
+      spec = ['unknown', typeHint, 0];
+    }
+    this.label = spec[0];
+    this.type = spec[1];
+    this.isCBlock = !!~['c', 'cf', 'e'].indexOf(this.type);
+    this.isEBlock = this.type === 'e';
+    this.isFinal = !!~['f', 'cf'].indexOf(this.type);
+    this.isHat = !!~['h', 'ph'].indexOf(this.type);
+    this.isCommand = this.type === ' ' || this.isHat || this.isFinal || this.isCBlock;
+    this.isReporter = !!['r', 'b'].indexOf(this.type);
+    this.isBoolean = this.type === 'b';
+    this.isAtomic =
+    this.category = spec[2];
+
+    this.color = undefinedColor;
+    for (var i = 0; i < categories.length; i++) {
+      if (categories[i][0] === this.category) {
+        this.color = categories[i][2];
+        break;
+      }
+    }
+
+    this.args = [];
+    this.parts = parseLabel(this.label).map(function(p) {
+      if (p[0] === '@' && p.length > 1) {
+        return new Icon(p.slice(1));
+      }
+      if (p[0] === '%' && p.length > 1) {
+        var v = tuple[this.args.length + (this.selector === CALL ? 2 : 1)];
+        var a =
+          typeof v === 'object' ? new Block(v) :
+          new Arg(p.slice(1).split('.'), this.selector === PROCEDURE_DEF ? tuple : v);
+        this.args.push(a);
+        return a;
+      }
+      return new Label(p.trim());
+    }, this);
+
+    var el = this.el = document.createElement('div');
+    el.className = 'block' +
+      (this.isCBlock ? ' command c-block' :
+        this.type === 'f' || this.type === ' ' ? ' command' :
+        this.type === 'h' ? ' hat' :
+        this.type === 'ph' ? ' proc-hat' :
+        this.type === 'r' ? ' reporter' :
+        this.type === 'b' ? ' boolean' : '') +
+      (typeHint !== ' ' ? ' arg' : '');
+
+    var partsEl = el;
+    if (this.isCBlock || this.isBoolean) {
+      partsEl = document.createElement('div');
+      partsEl.className = this.isBoolean ? 'boolean-parts' : 'parts';
+      this.el.appendChild(partsEl);
+    }
+
+    this.parts.forEach(function(p) {
+      partsEl.appendChild(p.el);
+    });
+
+    var col = hex(this.color);
+
+    if (this.isCBlock) {
+      var cEl = new Script(tuple[tuple.length-(this.isEBlock+1)], true).el;
+      el.appendChild(cEl);
+    }
+    if (this.isEBlock) {
+      var elseEl = document.createElement('div');
+      elseEl.className = 'fill else';
+      elseEl.style.backgroundColor = col;
+      elseEl.appendChild(new Label('else').el);
+      el.appendChild(elseEl);
+      var eEl = new Script(tuple[tuple.length-1], true).el;
+      el.appendChild(eEl);
+    }
+
+    var fills = [];
+    if (~['c', 'e', 'cf'].indexOf(this.type)) {
+      fills.push('puzzle-inner', 'left', 'top', ~['doForever', 'doForeverIf', 'doRepeat', 'doUntil'].indexOf(this.selector) ? 'bottom loop' : 'bottom');
+    }
+    if (~['c', 'e', 'cf', 'f', ' '].indexOf(this.type)) {
+      fills.push('puzzle-top');
+    }
+    if (~['c', 'e', 'h', 'ph', ' '].indexOf(this.type)) {
+      fills.push('puzzle-bottom');
+    }
+    if (~[' ', 'f'].indexOf(this.type)) fills.push('command-body');
+    if (this.type === 'e') fills.push('left2', 'puzzle-inner2');
+    if (this.type === 'h') fills.push('hat', 'hat-body');
+    if (this.type === 'ph') fills.push('proc-hat', 'proc-hat-body');
+    if (this.type === 'r') fills.push('reporter-body');
+    if (this.type === 'b') fills.push('boolean-body', 'boolean-left', 'boolean-right');
+
+    fills.forEach(function(className) {
+      var fill = document.createElement('div');
+      if (className === 'boolean-left' || className === 'boolean-right') {
+        fill.innerHTML = '<div class=boolean-angle style="background-color:' + col + '"></div><img src=debug/empty.png class=boolean-square>';
+        fill.className = className;
+      } else {
+        fill.className = 'fill '+className;
+        fill.style.backgroundColor = col;
+      }
+      if (className === 'boolean-left') {
+        el.insertBefore(fill, partsEl);
+        return;
+      }
+      (className === 'top' || className === 'boolean-body' || className === 'puzzle-inner' ? partsEl :
+        className === 'left' ? cEl :
+        className === 'left2' ? eEl :
+        className === 'puzzle-inner2' ? elseEl : el).appendChild(fill);
+    });
+  }
+
+  function Label(text) {
+    this.text = text;
+
+    var el = this.el = document.createElement('div');
+    el.className = 'label';
+    el.textContent = text;
+  }
+
+  function Icon(name) {
+    this.name = name;
+
+    var el = this.el = document.createElement('div');
+    el.className = 'icon icon-' + name;
+  }
+
+  var SPECIAL_VALUES = {
+    _edge_: 'edge',
+    _mouse_: 'mouse-pointer',
+    _myself_: 'myself',
+    _stage_: 'Stage'
+  };
+
+  function Arg(spec, value) {
+    this.type = spec[0];
+    this.menu = spec[1];
+
+    var el = this.el = document.createElement('div');
+    el.className = 'arg' +
+      (this.type === 'n' || this.type === 'd' ? ' number' :
+        this.type === 's' ? ' string' :
+        this.type === 'm' ? ' enum' :
+        this.type === 'b' ? ' bool' :
+        this.type === 'c' ? ' color' :
+        this.type === '_p' ? ' proc' : '') +
+      (this.menu ? ' menu' : '');
+
+    if (this.type === 'c') {
+      el.style.backgroundColor = hex(+value || 0);
+    } else if (this.type === '_p') {
+      this.args = [];
+      var types = (value[1].match(/%\w+/g) || []).map(function(x) {
+        return x.slice(1);
+      });
+      this.parts = parseLabel(value[1]).map(function(p) {
+        if (p[0] === '@' && p.length > 1) {
+          return new Icon(p.slice(1));
+        }
+        if (p[0] === '%' && p.length > 1) {
+          var a = new Block(['getParam', value[2][this.args.length], types[this.args.length]]);
+          this.args.push(a);
+          return a;
+        }
+        return new Label(p.trim());
+      }, this);
+
+      this.parts.forEach(function(p) {
+        el.appendChild(p.el);
+      });
+
+      ['puzzle-bottom', 'puzzle-top'].forEach(function(className) {
+        var fill = document.createElement('div');
+        fill.className = 'proc-fill ' + className;
+        fill.style.backgroundColor = hex(procedureColor);
+        el.appendChild(fill);
+      });
+    } else if (this.type === 'b') {
+      el.innerHTML = '<div class=boolean-left><div class=boolean-angle></div></div><div class="boolean-parts"><div class="fill boolean-body"></div></div><div class=boolean-right><div class=boolean-angle></div></div>';
+    } else {
+      el.textContent = this.menu && SPECIAL_VALUES[value] ? SPECIAL_VALUES[value] : value;
+    }
+  }
+
+  function loadScript(tuple) {
+    scriptPane.appendChild(new Script(tuple).el);
+  }
+
+  function loadScripts() {
+    stage.children[0].scripts.forEach(loadScript);
+  }
+
+  projectURL = prefix + projectId + '/';
+  projectTitle = '';
+  P.IO.loadScratchr2Project(projectId)
+    .onLoad(function(s) {
+      window.stage = stage = s;
+      loadScripts();
+      stage.draw();
+      stage.triggerGreenFlag();
+
+      player.appendChild(stage.root);
+      stage.focus();
+    })
+    .onError(function(e) {
+      setTitle('Error!');
+      console.error(e.stack);
+    });
+
+  P.IO.loadScratchr2ProjectTitle(projectId, function(title) {
+    setTitle(title);
+  });
+
+  var GET_VAR = "readVariable";
+  var SET_VAR = "setVar:to:";
+  var CHANGE_VAR = "changeVar:by:";
+  var GET_LIST = "contentsOfList:";
+  var CALL = "call";
+  var PROCEDURE_DEF = "procDef";
+  var GET_PARAM = "getParam";
+
+  var variableColor = 0xEE7D16; // Scratch 1.4: 0xF3761D
+  var listColor = 0xCC5B22; // Scratch 1.4: 0xD94D11
+  var procedureColor = 0x632D99; // 0x531E99;
+  var parameterColor = 0x5947B1;
+  var extensionsColor = 0x4B4A60; // 0x72228C; // 0x672D79;
+  var undefinedColor = 0xD42828;
+
+  var categories = [
+   // id   category name  color
+    [0,  "undefined",   0xD42828],
+    [1,  "Motion",      0x4a6cd4],
+    [2,  "Looks",       0x8a55d7],
+    [3,  "Sound",       0xbb42c3],
+    [4,  "Pen",         0x0e9a6c], // Scratch 1.4: 0x009870
+    [5,  "Events",      0xc88330],
+    [6,  "Control",     0xe1a91a],
+    [7,  "Sensing",     0x2ca5e2],
+    [8,  "Operators",   0x5cb712],
+    [9,  "Data",        variableColor],
+    [10, "More Blocks", procedureColor],
+    [11, "Parameter",   parameterColor],
+    [12, "List",        listColor],
+    [20, "Exension",    extensionsColor],
+  ];
+
+  var blockSpecs = [
+    // block specification                  type, cat, opcode           default args (optional)
+    // motion
+    ["move %n steps",                       " ", 1, "forward:",                 10],
+    ["turn @turnRight %n degrees",          " ", 1, "turnRight:",               15],
+    ["turn @turnLeft %n degrees",           " ", 1, "turnLeft:",                15],
+    ["--"],
+    ["point in direction %d.direction",     " ", 1, "heading:",                 90],
+    ["point towards %m.spriteOrMouse",      " ", 1, "pointTowards:",            ""],
+    ["--"],
+    ["go to x:%n y:%n",                     " ", 1, "gotoX:y:"],
+    ["go to %m.spriteOrMouse",              " ", 1, "gotoSpriteOrMouse:",       "mouse-pointer"],
+    ["glide %n secs to x:%n y:%n",          " ", 1, "glideSecs:toX:y:elapsed:from:"],
+    ["--"],
+    ["change x by %n",                      " ", 1, "changeXposBy:",            10],
+    ["set x to %n",                         " ", 1, "xpos:",                    0],
+    ["change y by %n",                      " ", 1, "changeYposBy:",            10],
+    ["set y to %n",                         " ", 1, "ypos:",                    0],
+    ["--"],
+    ["if on edge, bounce",                  " ", 1, "bounceOffEdge"],
+    ["-"],
+    ["set rotation style %m.rotationStyle", " ", 1, "setRotationStyle",         "left-right"],
+    ["--"],
+    ["x position",                          "r", 1, "xpos"],
+    ["y position",                          "r", 1, "ypos"],
+    ["direction",                           "r", 1, "heading"],
+
+    // looks
+    ["say %s for %n secs",                  " ", 2, "say:duration:elapsed:from:",   "Hello!", 2],
+    ["say %s",                              " ", 2, "say:",                         "Hello!"],
+    ["think %s for %n secs",                " ", 2, "think:duration:elapsed:from:", "Hmm...", 2],
+    ["think %s",                            " ", 2, "think:",                       "Hmm..."],
+    ["-"],
+    ["show",                                " ", 2, "show"],
+    ["hide",                                " ", 2, "hide"],
+    ["-"],
+    ["switch costume to %m.costume",        " ", 2, "lookLike:",                "costume1"],
+    ["next costume",                        " ", 2, "nextCostume"],
+    ["switch backdrop to %m.backdrop",      " ", 2, "startScene",               "backdrop1"],
+    ["-"],
+    ["change %m.effect effect by %n",       " ", 2, "changeGraphicEffect:by:",  "color", 25],
+    ["set %m.effect effect to %n",          " ", 2, "setGraphicEffect:to:",     "color", 0],
+    ["clear graphic effects",               " ", 2, "filterReset"],
+    ["-"],
+    ["change size by %n",                   " ", 2, "changeSizeBy:",            10],
+    ["set size to %n%",                     " ", 2, "setSizeTo:",               100],
+    ["-"],
+    ["go to front",                         " ", 2, "comeToFront"],
+    ["go back %n layers",                   " ", 2, "goBackByLayers:",          1],
+    ["-"],
+    ["costume #",                           "r", 2, "costumeIndex"],
+    ["backdrop name",                       "r", 2, "sceneName"],
+    ["size",                                "r", 2, "scale"],
+
+    // stage looks
+    ["switch backdrop to %m.backdrop",          " ", 102, "startScene",             "backdrop1"],
+    ["switch backdrop to %m.backdrop and wait", " ", 102, "startSceneAndWait",      "backdrop1"],
+    ["next backdrop",                           " ", 102, "nextScene"],
+    ["-"],
+    ["change %m.effect effect by %n",       " ", 102, "changeGraphicEffect:by:",    "color", 25],
+    ["set %m.effect effect to %n",          " ", 102, "setGraphicEffect:to:",       "color", 0],
+    ["clear graphic effects",               " ", 102, "filterReset"],
+    ["-"],
+    ["backdrop name",                       "r", 102, "sceneName"],
+    ["backdrop #",                          "r", 102, "backgroundIndex"],
+
+    // sound
+    ["play sound %m.sound",                 " ", 3, "playSound:",                       "pop"],
+    ["play sound %m.sound until done",      " ", 3, "doPlaySoundAndWait",               "pop"],
+    ["stop all sounds",                     " ", 3, "stopAllSounds"],
+    ["-"],
+    ["play drum %d.drum for %n beats",      " ", 3, "playDrum",                         1, 0.25],
+    ["rest for %n beats",                   " ", 3, "rest:elapsed:from:",               0.25],
+    ["-"],
+    ["play note %d.note for %n beats",      " ", 3, "noteOn:duration:elapsed:from:",    60, 0.5],
+    ["set instrument to %d.instrument",     " ", 3, "instrument:",                      1],
+
+    ["-"],
+    ["change volume by %n",                 " ", 3, "changeVolumeBy:",                  -10],
+    ["set volume to %n%",                   " ", 3, "setVolumeTo:",                     100],
+    ["volume",                              "r", 3, "volume"],
+    ["-"],
+    ["change tempo by %n",                  " ", 3, "changeTempoBy:",                   20],
+    ["set tempo to %n bpm",                 " ", 3, "setTempoTo:",                      60],
+    ["tempo",                               "r", 3,  "tempo"],
+
+    // pen
+    ["clear",                               " ", 4, "clearPenTrails"],
+    ["-"],
+    ["stamp",                               " ", 4, "stampCostume"],
+    ["-"],
+    ["pen down",                            " ", 4, "putPenDown"],
+    ["pen up",                              " ", 4, "putPenUp"],
+    ["-"],
+    ["set pen color to %c",                 " ", 4, "penColor:"],
+    ["change pen color by %n",              " ", 4, "changePenHueBy:"],
+    ["set pen color to %n",                 " ", 4, "setPenHueTo:",         0],
+    ["-"],
+    ["change pen shade by %n",              " ", 4, "changePenShadeBy:"],
+    ["set pen shade to %n",                 " ", 4, "setPenShadeTo:",       50],
+    ["-"],
+    ["change pen size by %n",               " ", 4, "changePenSizeBy:",     1],
+    ["set pen size to %n",                  " ", 4, "penSize:",             1],
+    ["-"],
+
+    // stage pen
+    ["clear",                               " ", 104, "clearPenTrails"],
+
+    // triggers
+    ["when @greenFlag clicked",             "h", 5, "whenGreenFlag"],
+    ["when %m.key key pressed",             "h", 5, "whenKeyPressed",       "space"],
+    ["when this sprite clicked",            "h", 5, "whenClicked"],
+    ["when backdrop switches to %m.backdrop", "h", 5, "whenSceneStarts",    "backdrop1"],
+    ["--"],
+    ["when %m.triggerSensor > %n",          "h", 5, "whenSensorGreaterThan", "loudness", 10],
+    ["--"],
+    ["when I receive %m.broadcast",         "h", 5, "whenIReceive",         ""],
+    ["broadcast %m.broadcast",              " ", 5, "broadcast:",           ""],
+    ["broadcast %m.broadcast and wait",     " ", 5, "doBroadcastAndWait",   ""],
+
+    // control - sprite
+    ["wait %n secs",                        " ", 6, "wait:elapsed:from:",   1],
+    ["-"],
+    ["repeat %n",                           "c", 6, "doRepeat", 10],
+    ["forever",                             "cf",6, "doForever"],
+    ["-"],
+    ["if %b then",                          "c", 6, "doIf"],
+    ["if %b then",                          "e", 6, "doIfElse"],
+    ["wait until %b",                       " ", 6, "doWaitUntil"],
+    ["repeat until %b",                     "c", 6, "doUntil"],
+    ["-"],
+    ["stop %m.stop",                        "f", 6, "stopScripts", "all"],
+    ["-"],
+    ["when I start as a clone",             "h", 6, "whenCloned"],
+    ["create clone of %m.spriteOnly",       " ", 6, "createCloneOf"],
+    ["delete this clone",                   "f", 6, "deleteClone"],
+    ["-"],
+
+    // control - stage
+    ["wait %n secs",                        " ", 106, "wait:elapsed:from:", 1],
+    ["-"],
+    ["repeat %n",                           "c", 106, "doRepeat", 10],
+    ["forever",                             "cf",106, "doForever"],
+    ["-"],
+    ["if %b then",                          "c", 106, "doIf"],
+    ["if %b then",                          "e", 106, "doIfElse"],
+    ["wait until %b",                       " ", 106, "doWaitUntil"],
+    ["repeat until %b",                     "c", 106, "doUntil"],
+    ["-"],
+    ["stop %m.stop",                        "f", 106, "stopScripts", "all"],
+    ["-"],
+    ["create clone of %m.spriteOnly",       " ", 106, "createCloneOf"],
+
+    // sensing
+    ["touching %m.touching?",               "b", 7, "touching:",            ""],
+    ["touching color %c?",                  "b", 7, "touchingColor:"],
+    ["color %c is touching %c?",            "b", 7, "color:sees:"],
+    ["distance to %m.spriteOrMouse",        "r", 7, "distanceTo:",          ""],
+    ["-"],
+    ["ask %s and wait",                     " ", 7, "doAsk",                "What's your name?"],
+    ["answer",                              "r", 7, "answer"],
+    ["-"],
+    ["key %m.key pressed?",                 "b", 7, "keyPressed:",          "space"],
+    ["mouse down?",                         "b", 7, "mousePressed"],
+    ["mouse x",                             "r", 7, "mouseX"],
+    ["mouse y",                             "r", 7, "mouseY"],
+    ["-"],
+    ["loudness",                            "r", 7, "soundLevel"],
+    ["-"],
+    ["video %m.videoMotionType on %m.stageOrThis", "r", 7, "senseVideoMotion", "motion"],
+    ["turn video %m.videoState",            " ", 7, "setVideoState",            "on"],
+    ["set video transparency to %n%",       " ", 7, "setVideoTransparency",     50],
+    ["-"],
+    ["timer",                               "r", 7, "timer"],
+    ["reset timer",                         " ", 7, "timerReset"],
+    ["-"],
+    ["%m.attribute of %m.spriteOrStage",    "r", 7, "getAttribute:of:"],
+    ["-"],
+    ["current %m.timeAndDate",              "r", 7, "timeAndDate",          "minute"],
+    ["days since 2000",                     "r", 7, "timestamp"],
+    ["username",                            "r", 7, "getUserName"],
+
+    // stage sensing
+    ["ask %s and wait",                     " ", 107, "doAsk",              "What's your name?"],
+    ["answer",                              "r", 107, "answer"],
+    ["-"],
+    ["key %m.key pressed?",                 "b", 107, "keyPressed:",        "space"],
+    ["mouse down?",                         "b", 107, "mousePressed"],
+    ["mouse x",                             "r", 107, "mouseX"],
+    ["mouse y",                             "r", 107, "mouseY"],
+    ["-"],
+    ["loudness",                            "r", 107, "soundLevel"],
+    ["-"],
+    ["video %m.videoMotionType on %m.stageOrThis", "r", 107, "senseVideoMotion", "motion", "Stage"],
+    ["turn video %m.videoState",            " ", 107, "setVideoState",          "on"],
+    ["set video transparency to %n%",       " ", 107, "setVideoTransparency",   50],
+    ["-"],
+    ["timer",                               "r", 107, "timer"],
+    ["reset timer",                         " ", 107, "timerReset"],
+    ["-"],
+    ["%m.attribute of %m.spriteOrStage",    "r", 107, "getAttribute:of:"],
+    ["-"],
+    ["current %m.timeAndDate",              "r", 107, "timeAndDate",        "minute"],
+    ["days since 2000",                     "r", 107, "timestamp"],
+    ["username",                            "r", 107, "getUserName"],
+
+    // operators
+    ["%n + %n",                             "r", 8, "+",                    "", ""],
+    ["%n - %n",                             "r", 8, "-",                    "", ""],
+    ["%n * %n",                             "r", 8, "*",                    "", ""],
+    ["%n / %n",                             "r", 8, "/",                    "", ""],
+    ["-"],
+    ["pick random %n to %n",        "r", 8, "randomFrom:to:",       1, 10],
+    ["-"],
+    ["%s < %s",                             "b", 8, "<",                    "", ""],
+    ["%s = %s",                             "b", 8, "=",                    "", ""],
+    ["%s > %s",                             "b", 8, ">",                    "", ""],
+    ["-"],
+    ["%b and %b",                           "b", 8, "&"],
+    ["%b or %b",                            "b", 8, "|"],
+    ["not %b",                              "b", 8, "not"],
+    ["-"],
+    ["join %s %s",                          "r", 8, "concatenate:with:",    "hello ", "world"],
+    ["letter %n of %s",                     "r", 8, "letter:of:",           1, "world"],
+    ["length of %s",                        "r", 8, "stringLength:",        "world"],
+    ["-"],
+    ["%n mod %n",                           "r", 8, "%",                    "", ""],
+    ["round %n",                            "r", 8, "rounded",              ""],
+    ["-"],
+    ["%m.mathOp of %n",                     "r", 8, "computeFunction:of:",  "sqrt", 9],
+
+    // variables
+    ["set %m.var to %s",                                " ", 9, SET_VAR],
+    ["change %m.var by %n",                             " ", 9, CHANGE_VAR],
+    ["show variable %m.var",                            " ", 9, "showVariable:"],
+    ["hide variable %m.var",                            " ", 9, "hideVariable:"],
+
+    // lists
+    ["add %s to %m.list",                               " ", 12, "append:toList:"],
+    ["-"],
+    ["delete %d.listDeleteItem of %m.list",             " ", 12, "deleteLine:ofList:"],
+    ["insert %s at %d.listItem of %m.list",             " ", 12, "insert:at:ofList:"],
+    ["replace item %d.listItem of %m.list with %s",     " ", 12, "setLine:ofList:to:"],
+    ["-"],
+    ["item %d.listItem of %m.list",                     "r", 12, "getLine:ofList:"],
+    ["length of %m.list",                               "r", 12, "lineCountOfList:"],
+    ["%m.list contains %s",                             "b", 12, "list:contains:"],
+    ["-"],
+    ["show list %m.list",                               " ", 12, "showList:"],
+    ["hide list %m.list",                               " ", 12, "hideList:"],
+
+    // obsolete blocks from Scratch 1.4 that may be used in older projects
+    ["play drum %n for %n beats",           " ", 98, "drum:duration:elapsed:from:", 1, 0.25], // Scratch 1.4 MIDI drum
+    ["set instrument to %n",                " ", 98, "midiInstrument:", 1],
+    ["loud?",                               "b", 98, "isLoud"],
+
+    // obsolete blocks from Scratch 1.4 that are converted to new forms (so should never appear):
+    ["abs %n",                              "r", 98, "abs"],
+    ["sqrt %n",                             "r", 98, "sqrt"],
+    ["stop script",                         "f", 98, "doReturn"],
+    ["stop all",                            "f", 98, "stopAll"],
+    ["switch to background %m.costume",     " ", 98, "showBackground:", "backdrop1"],
+    ["next background",                     " ", 98, "nextBackground"],
+    ["forever if %b",                       "cf",98, "doForeverIf"],
+
+    // testing and experimental control prims
+    ["noop",                                "r", 99, "COUNT"],
+    ["counter",                             "r", 99, "COUNT"],
+    ["clear counter",                       " ", 99, "CLR_COUNT"],
+    ["incr counter",                        " ", 99, "INCR_COUNT"],
+    ["for each %m.varName in %s",           "c", 99, "doForLoop", "v", 10],
+    ["while %b",                            "c", 99, "doWhile"],
+    ["all at once",                         "c", 99, "warpSpeed"],
+
+    // stage motion (scrolling)
+    ["scroll right %n",                     " ", 99, "scrollRight",     10],
+    ["scroll up %n",                        " ", 99, "scrollUp",        10],
+    ["align scene %m.scrollAlign",          " ", 99, "scrollAlign",     'bottom-left'],
+    ["x scroll",                            "r", 99, "xScroll"],
+    ["y scroll",                            "r", 99, "yScroll"],
+
+    // other obsolete blocks from alpha/beta
+    ["hide all sprites",                    " ", 99, "hideAll"],
+    ["user id",                             "r", 99, "getUserId"],
+  ];
+
+}());
+
+</script>

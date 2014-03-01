@@ -2,6 +2,7 @@
 <meta charset=utf-8>
 <meta name=viewport content="width=device-width, initial-scale=1.0">
 <title>phosphorus</title>
+<link rel=stylesheet href=player.css>
 <link rel=stylesheet href=index.css>
 <div class=controls>
   <span class=stop></span>
@@ -90,7 +91,6 @@
   }
   function turboClick() {
     stage.isTurbo = !stage.isTurbo;
-    flag.style.textDecoration = stage.isTurbo ? 'underline' : 'none';
     flag.title = stage.isTurbo ? 'Turbo mode enabled. Shift+click to disable.' : 'Shift+click to enable turbo mode.';
     turbo.style.display = stage.isTurbo ? 'block' : 'none';
   }

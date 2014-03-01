@@ -45,55 +45,9 @@ body {
   left: 0;
   background-position: -160px 0;
 }
-.controls {
-  height: 32px;
-}
-.controls span,
-.project-link {
-  width: 32px;
-  height: 32px;
-  float: right;
-  cursor: pointer;
-  text-align: center;
-  opacity: .4;
-  background-image: url(icons.svg);
-  text-decoration: none;
-}
-.controls .stop {
-  background-position: -96px 0;
-}
-.controls .pause {
-  background-position: -32px 0;
-}
-.controls .play {
-  background-position: -64px 0;
-}
-.controls .full-screen {
-  float: left;
-  background-position: -128px 0;
-}
-.controls span:active,
-.project-link:active {
-  opacity: 1 !important;
-}
-.controls .turbo {
-  float: right;
-  display: none;
-  cursor: default;
-  color: rgba(0, 0, 0, .4);
-  font: 500 12px/32px Helvetica Neue, Helvetica, Arial, sans-serif;
-  padding: 0 8px;
-}
+
 .player {
   box-shadow: 0 0 0 1px rgba(0, 0, 0, .4);
-  width: 480px;
-  height: 360px;
-  position: relative;
-  -webkit-transform-origin: 0 0;
-  -moz-transform-origin: 0 0;
-  -ms-transform-origin: 0 0;
-  -o-transform-origin: 0 0;
-  transform-origin: 0 0;
 }
 
 .error {
