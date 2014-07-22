@@ -168,20 +168,32 @@ var P = (function() {
 
   var IO = {};
 
-  IO.BASE_URL = 'http://scratch.mit.edu/internalapi/'
-  IO.PROJECT_URL = IO.BASE_URL + 'project/';
-  IO.ASSET_URL = IO.BASE_URL + 'asset/';
+  IO.PROJECT_URL = 'http://projects.scratch.mit.edu/internalapi/project/';
+  IO.ASSET_URL = 'http://scratch.mit.edu/internalapi/asset/';
 
   IO.PROXY_URL = 'proxy.php?u=';
+
+  IO.FONTS = {
+    '': 'Helvetica',
+    'Donegal': 'Donegal One',
+    'Gloria': 'Gloria Hallelujah',
+    'Marker': 'Permanent Marker',
+    'Mystery': 'Mystery Quest'
+  };
 
   IO.init = function(request) {
     IO.projectRequest = request;
     IO.zip = null;
-    IO.costumes = null;
-    IO.images = null;
   };
 
-  IO.load = function(url, callback, self) {
+  IO.parseJSONish = function(json) {
+    if (/[^,:{}\[\]0-9\.\-+EINaefilnr-uy \n\r\t]/.test(json.replace(/"(\\.|[^"\\])*"/g, ''))) {
+      throw new SyntaxError('Bad JSON');
+    }
+    return (1, eval)('(' + json + ')');
+  };
+
+  IO.load = function(url, callback, self, type) {
     var request = new Request;
     var xhr = new XMLHttpRequest;
     xhr.open('GET', IO.PROXY_URL + encodeURIComponent(url), true);
@@ -190,7 +202,7 @@ var P = (function() {
     };
     xhr.onload = function() {
       if (xhr.status === 200) {
-        request.load(xhr.responseText);
+        request.load(xhr.response);
       } else {
         request.error(new Error('HTTP ' + xhr.status + ': ' + xhr.statusText));
       }
@@ -198,6 +210,7 @@ var P = (function() {
     xhr.onerror = function() {
       request.error(new Error('XHR Error'));
     };
+    xhr.responseType = type;
     setTimeout(xhr.send.bind(xhr));
 
     if (callback) request.onLoad(callback.bind(self));
@@ -212,34 +225,8 @@ var P = (function() {
       request.load(image);
     };
     image.onerror = function() {
-      request.error(new Error('Failed to load image'));
+      request.error(new Error('Failed to load image: ' + url));
     };
-    // var xhr = new XMLHttpRequest;
-    // xhr.open('GET', IO.PROXY_URL + encodeURIComponent(url), true);
-    // xhr.responseType = 'blob';
-    // xhr.onprogress = function(e) {
-    //   request.progress(e.loaded, e.total, e.lengthComputable);
-    // };
-    // xhr.onload = function(e) {
-    //   if (xhr.status === 200) {
-    //     var reader = new FileReader;
-    //     reader.addEventListener('loadend', function() {
-    //       var image = new Image;
-    //       image.src = reader.result;
-    //       image.onload = function() {
-    //         request.load(image);
-    //       };
-    //     });
-    //     reader.readAsDataURL(xhr.response);
-    //   } else {
-    //     request.error(new Error('HTTP ' + xhr.status + ': ' + xhr.statusText));
-    //   }
-    // };
-    // xhr.onerror = function() {
-    //   request.error(new Image('Failed to load image'));
-    // };
-    // xhr.send();
-
     if (callback) request.onLoad(callback.bind(self));
     return request;
   };
@@ -249,9 +236,25 @@ var P = (function() {
     IO.init(request);
 
     request.defer = true;
-    request.add(IO.load(IO.PROJECT_URL + id + '/get/?' + Math.random().toString().slice(2)).onLoad(function(contents) {
+    var url = IO.PROJECT_URL + id + '/get/?' + Math.random().toString().slice(2);
+    request.add(IO.load(url).onLoad(function(contents) {
       try {
-        var json = JSON.parse(contents);
+        var json = IO.parseJSONish(contents);
+      } catch (e) {
+        request.add(IO.load(url, null, null, 'arraybuffer').onLoad(function(ab) {
+          var request2 = new Request;
+          request.add(request2);
+          request.add(IO.loadSB2Project(ab, function(stage) {
+            request.getResult = function() {
+              return stage;
+            };
+            request2.load();
+          }));
+          request.defer = false;
+        }));
+        return;
+      }
+      try {
         IO.loadProject(json);
         if (callback) request.onLoad(callback.bind(self));
         if (request.isDone) {
@@ -317,10 +320,7 @@ var P = (function() {
 
     try {
       IO.zip = new JSZip(ab);
-      var json = JSON.parse(IO.zip.file('project.json').asText());
-
-      IO.images = 1; // ignore pen trails
-      IO.sounds = 0;
+      var json = IO.parseJSONish(IO.zip.file('project.json').asText());
 
       IO.loadProject(json);
       if (callback) request.onLoad(callback.bind(self));
@@ -392,11 +392,11 @@ var P = (function() {
   };
 
   IO.loadCostume = function(data) {
-    IO.loadMD5(data.baseLayerMD5, function(asset) {
+    IO.loadMD5(data.baseLayerMD5, data.baseLayerID, function(asset) {
       data.$image = asset;
     });
     if (data.textLayerMD5) {
-      IO.loadMD5(data.textLayerMD5, function(asset) {
+      IO.loadMD5(data.textLayerMD5, data.textLayerID, function(asset) {
         data.$text = asset;
       });
     }
@@ -406,15 +406,58 @@ var P = (function() {
     // TODO
   };
 
-  IO.loadMD5 = function(md5, callback, zip, index) {
+  IO.fixSVG = function(svg, element) {
+    if (element.nodeType !== 1) return;
+    if (element.nodeName == 'text') {
+      var font = IO.FONTS[element.getAttribute('font-family') || ''];
+      if (font) {
+        element.setAttribute('font-family', font);
+      }
+      if (!element.getAttribute('font-size')) {
+        element.setAttribute('font-size', 18);
+      }
+      var bb = element.getBBox();
+      element.setAttribute('y', (element.getAttribute('y') - bb.y) * 1.1);
+      element.setAttribute('x', 4 - .6 * element.transform.baseVal.consolidate().matrix.a);
+      // svg.style.cssText = '';
+      // console.log(element.textContent, 'data:image/svg+xml;base64,' + btoa(svg.outerHTML));
+    } else if ((element.hasAttribute('x') || element.hasAttribute('y')) && element.hasAttribute('transform')) {
+      element.setAttribute('x', 0);
+      element.setAttribute('y', 0);
+    }
+    [].forEach.call(element.childNodes, IO.fixSVG.bind(null, svg));
+  };
+
+  IO.loadMD5 = function(md5, id, callback) {
     var ext = md5.split('.').pop();
     if (ext === 'svg') {
       var cb = function(source) {
+        var div = document.createElement('div');
+        div.innerHTML = source;
+        var svg = div.getElementsByTagName('svg')[0];
+        svg.style.visibility = 'hidden';
+        svg.style.position = 'absolute';
+        svg.style.left = '-10000px';
+        svg.style.top = '-10000px';
+        document.body.appendChild(svg);
+        var viewBox = svg.viewBox.baseVal;
+        if (viewBox.x || viewBox.y) {
+          viewBox.x = 0;
+          viewBox.y = 0;
+          viewBox.width = 0;
+          viewBox.height = 0;
+        }
+        IO.fixSVG(svg, svg);
+        while (div.firstChild) div.removeChild(div.lastChild);
+        div.appendChild(svg);
+        svg.style.visibility = 'visible';
+
         var canvas = document.createElement('canvas');
         var context = canvas.getContext('2d');
         var image = new Image;
         callback(image);
-        canvg(canvas, source, {
+        // console.log(md5, 'data:image/svg+xml;base64,' + btoa(div.innerHTML.trim()));
+        canvg(canvas, div.innerHTML.trim(), {
           ignoreMouse: true,
           ignoreAnimation: true,
           ignoreClear: true,
@@ -424,26 +467,20 @@ var P = (function() {
         })
       };
       if (IO.zip) {
-        var image = IO.images;
-        IO.images += 1;
-
-        cb(IO.zip.file(image + '.svg').asText());
+        cb(IO.zip.file(id + '.svg').asText());
       } else {
         IO.projectRequest.add(IO.load(IO.ASSET_URL + md5 + '/get/', cb));
       }
     } else {
       if (IO.zip) {
-        var image = IO.images;
-        IO.images += 1;
-
         var request = new Request;
-        var f = IO.zip.file(image + '.' + ext).asBinary();
-        var img = new Image;
-        img.onload = function() {
-          if (callback) callback(img);
+        var f = IO.zip.file(id + '.' + ext).asBinary();
+        var image = new Image;
+        image.onload = function() {
+          if (callback) callback(image);
           request.load();
         };
-        img.src = 'data:image/' + (ext === 'jpg' ? 'jpeg' : ext) + ';base64,' + btoa(f);
+        image.src = 'data:image/' + (ext === 'jpg' ? 'jpeg' : ext) + ';base64,' + btoa(f);
         IO.projectRequest.add(request);
       } else {
         IO.projectRequest.add(
@@ -530,15 +567,17 @@ var P = (function() {
 
   Base.prototype.showNextCostume = function() {
     this.currentCostumeIndex = (this.currentCostumeIndex + 1) % this.costumes.length;
+    if (this.saying) this.updateBubble();
   };
 
   Base.prototype.showPreviousCostume = function() {
     var length = this.costumes.length;
     this.currentCostumeIndex = (this.currentCostumeIndex + length - 1) % length;
+    if (this.saying) this.updateBubble();
   };
 
   Base.prototype.getCostumeName = function() {
-    return this.costumes[this.currentCostumeIndex] ? this.costumes[this.currentCostumeIndex].objName : '';
+    return this.costumes[this.currentCostumeIndex] ? this.costumes[this.currentCostumeIndex].costumeName : '';
   };
 
   Base.prototype.setCostume = function(costume) {
@@ -547,13 +586,23 @@ var P = (function() {
       for (var i = 0; i < this.costumes.length; i++) {
         if (this.costumes[i].costumeName === costume) {
           this.currentCostumeIndex = i;
+          if (this.saying) this.updateBubble();
           return;
         }
       }
+      if (costume === (this.isSprite ? 'next costume' : 'next backdrop')) {
+        this.showNextCostume();
+        return;
+      }
+      if (costume === (this.isSprite ? 'previous costume' : 'previous backdrop')) {
+        this.showPreviousCostume();
+        return;
+      }
     }
-    i = (Math.floor(Number(costume) || 0) - 1) % this.costumes.length;
+    i = (Math.floor(Number(costume)) - 1 || 0) % this.costumes.length;
     if (i < 0) i += this.costumes.length;
     this.currentCostumeIndex = i;
+    if (this.saying) this.updateBubble();
   };
 
   Base.prototype.setFilter = function(name, value) {
@@ -567,8 +616,6 @@ var P = (function() {
         min = -Infinity;
         max = Infinity;
         break;
-        max = Infinity;
-        break;
       case 'color':
         value = value % 200;
         if (value < 0) value += 200;
@@ -578,7 +625,10 @@ var P = (function() {
     if (value < min) value = min;
     if (value > max) value = max;
     this.filters[name] = value;
-    this.updateFilters();
+  };
+
+  Base.prototype.changeFilter = function(name, value) {
+    this.setFilter(name, this.filters[name] + value);
   };
 
   Base.prototype.resetFilters = function() {
@@ -593,6 +643,24 @@ var P = (function() {
     };
   };
 
+  Base.prototype.ask = function(question) {
+    var stage = this.stage;
+    if (question) {
+      if (this.isSprite && this.visible) {
+        stage.promptTitle.style.display = 'none';
+      } else {
+        stage.promptTitle.style.display = 'block';
+        stage.promptTitle.textContent = question;
+      }
+    } else {
+      stage.promptTitle.style.display = 'none';
+    }
+    stage.hidePrompt = false;
+    stage.prompter.style.display = 'block';
+    stage.prompt.value = '';
+    stage.prompt.focus();
+  };
+
   var Stage = function() {
     this.stage = this;
 
@@ -603,18 +671,17 @@ var P = (function() {
     this.defaultWatcherY = 10;
 
     this.info = {};
+    this.answer = '';
+    this.promptId = 0;
+    this.nextPromptId = 0;
     this.tempoBPM = 60;
     this.videoAlpha = 1;
     this.zoom = 1;
+    this.maxZoom = 1;
     this.baseNow = 0;
     this.baseTime = 0;
     this.timerStart = 0;
     this.cloneCount = 0;
-
-    this.penCanvas = document.createElement('canvas');
-    this.penCanvas.width = 480;
-    this.penCanvas.height = 360;
-    this.penContext = this.penCanvas.getContext('2d');
 
     this.keys = {};
     this.rawMouseX = 0;
@@ -623,7 +690,24 @@ var P = (function() {
     this.mouseY = 0;
     this.mousePressed = false;
 
+    this.penCanvas = document.createElement('canvas');
+    this.penCanvas.width = 480;
+    this.penCanvas.height = 360;
+    this.penContext = this.penCanvas.getContext('2d');
+
+    this.root = document.createElement('div');
+    this.root.style.position = 'absolute';
+    this.root.style.overflow = 'hidden';
+    this.root.style.width = '480px';
+    this.root.style.height = '360px';
+    this.root.style.fontSize = '1px';
+    this.root.style.WebkitUserSelect =
+    this.root.style.MozUserSelect =
+    this.root.style.MSUserSelect =
+    this.root.style.WebkitUserSelect = 'none';
+
     this.canvas = document.createElement('canvas');
+    this.root.appendChild(this.canvas);
     this.canvas.width = 480;
     this.canvas.height = 360;
     this.context = this.canvas.getContext('2d');
@@ -696,6 +780,65 @@ var P = (function() {
       }.bind(this));
     }
 
+    this.prompter = document.createElement('div');
+    this.root.appendChild(this.prompter);
+    this.prompter.style.position = 'absolute';
+    this.prompter.style.left =
+    this.prompter.style.right = '14em';
+    this.prompter.style.bottom = '6em';
+    this.prompter.style.padding = '5em 30em 5em 5em';
+    this.prompter.style.border = '3em solid rgb(46, 174, 223)';
+    this.prompter.style.borderRadius = '8em';
+    this.prompter.style.background = '#fff';
+    this.prompter.style.display = 'none';
+
+    this.promptTitle = document.createElement('div');
+    this.prompter.appendChild(this.promptTitle);
+    this.promptTitle.textContent = '';
+    this.promptTitle.style.cursor = 'default';
+    this.promptTitle.style.font = 'bold 13em sans-serif';
+    this.promptTitle.style.margin = '0 '+(-25/13)+'em '+(5/13)+'em 0';
+    this.promptTitle.style.whiteSpace = 'pre';
+    this.promptTitle.style.overflow = 'hidden';
+    this.promptTitle.style.textOverflow = 'ellipsis';
+
+    this.prompt = document.createElement('input');
+    this.prompter.appendChild(this.prompt);
+    this.prompt.style.border = '0';
+    this.prompt.style.background = '#eee';
+    this.prompt.style.MozBoxSizing =
+    this.prompt.style.boxSizing = 'border-box';
+    this.prompt.style.font = '13em sans-serif';
+    this.prompt.style.padding = '0 '+(3/13)+'em';
+    this.prompt.style.outline = '0';
+    this.prompt.style.margin = '0';
+    this.prompt.style.width = '100%';
+    this.prompt.style.height = ''+(20/13)+'em';
+    this.prompt.style.display = 'block';
+    this.prompt.style.WebkitBorderRadius =
+    this.prompt.style.borderRadius = '0';
+    this.prompt.style.WebkitBoxShadow =
+    this.prompt.style.boxShadow = 'inset '+(1/13)+'em '+(1/13)+'em '+(2/13)+'em rgba(0, 0, 0, .2), inset '+(-1/13)+'em '+(-1/13)+'em '+(1/13)+'em rgba(255, 255, 255, .2)';
+    this.prompt.style.WebkitAppearance = 'none';
+
+    this.promptButton = document.createElement('div');
+    this.prompter.appendChild(this.promptButton);
+    this.promptButton.style.width = '22em';
+    this.promptButton.style.height = '22em';
+    this.promptButton.style.position = 'absolute';
+    this.promptButton.style.right = '4em';
+    this.promptButton.style.bottom = '4em';
+    this.promptButton.style.background = 'url(icons.svg) -165em -37em';
+    this.promptButton.style.backgroundSize = '320em 96em';
+
+    this.prompt.addEventListener('keydown', function(e) {
+      if (e.keyCode === 13) {
+        this.submitPrompt();
+      }
+    }.bind(this));
+
+    this.promptButton.addEventListener(hasTouchEvents ? 'touchstart' : 'mousedown', this.submitPrompt.bind(this));
+
   };
   inherits(Stage, Base);
 
@@ -719,7 +862,11 @@ var P = (function() {
   };
 
   Stage.prototype.focus = function() {
-    this.canvas.focus();
+    if (this.promptId < this.nextPromptId) {
+      this.prompt.focus();
+    } else {
+      this.canvas.focus();
+    }
   };
 
   Stage.prototype.updateMouse = function(e) {
@@ -734,6 +881,26 @@ var P = (function() {
     if (y > 180) y = 180;
     this.mouseX = x;
     this.mouseY = y;
+  };
+
+  Stage.prototype.setZoom = function(zoom) {
+    if (this.zoom === zoom) return;
+    if (this.maxZoom < zoom) {
+      this.maxZoom = zoom;
+      var canvas = this.penCanvas;
+      this.penCanvas = document.createElement('canvas');
+      this.penCanvas.width = 480 * zoom;
+      this.penCanvas.height = 360 * zoom;
+      this.penContext = this.penCanvas.getContext('2d');
+      this.penContext.drawImage(canvas, 0, 0, 480 * zoom, 360 * zoom);
+      this.penContext.scale(this.maxZoom, this.maxZoom);
+    }
+    this.root.style.width =
+    this.canvas.style.width = 480 * zoom + 'px';
+    this.root.style.height =
+    this.canvas.style.height = 360 * zoom + 'px';
+    this.root.style.fontSize = zoom + 'px';
+    this.zoom = zoom;
   };
 
   Stage.prototype.clickMouse = function() {
@@ -773,6 +940,7 @@ var P = (function() {
     var i = this.children.length;
     while (i--) {
       if (this.children[i].isClone) {
+        this.children[i].remove();
         this.children.splice(i, 1);
       }
     }
@@ -790,6 +958,16 @@ var P = (function() {
     }
   };
 
+  Stage.prototype.getObjects = function(name) {
+    var result = [];
+    for (var i = 0; i < this.children.length; i++) {
+      if (this.children[i].objName === name) {
+        result.push(this.children[i]);
+      }
+    }
+    return result;
+  };
+
   Stage.prototype.draw = function() {
     var context = this.context;
 
@@ -802,6 +980,12 @@ var P = (function() {
     this.drawOn(context);
 
     context.restore();
+
+    if (this.hidePrompt) {
+      this.hidePrompt = false;
+      this.prompter.style.display = 'none';
+      this.canvas.focus();
+    }
   };
 
   Stage.prototype.drawOn = function(context, except) {
@@ -812,7 +996,10 @@ var P = (function() {
     context.drawImage(costume.image, 0, 0);
     context.restore();
 
+    context.save();
+    context.scale(1 / this.maxZoom, 1 / this.maxZoom);
     context.drawImage(this.penCanvas, 0, 0);
+    context.restore();
 
     for (var i = 0; i < this.children.length; i++) {
       if (this.children[i].visible && this.children[i] !== except) {
@@ -822,6 +1009,16 @@ var P = (function() {
   };
 
   Stage.prototype.moveTo = function() {};
+
+  Stage.prototype.submitPrompt = function() {
+    if (this.promptId < this.nextPromptId) {
+      this.answer = this.prompt.value;
+      this.promptId += 1;
+      if (this.promptId >= this.nextPromptId) {
+        this.hidePrompt = true;
+      }
+    }
+  };
 
   var KEY_CODES = {
     'space': 32,
@@ -861,6 +1058,10 @@ var P = (function() {
     this.penSize = 1;
     this.isPenDown = false;
     this.isSprite = true;
+    this.bubble = null;
+    this.saying = false;
+    this.thinking = false;
+    this.sayId = 0;
   };
   inherits(Sprite, Base);
 
@@ -985,6 +1186,9 @@ var P = (function() {
       context.lineTo(240 + x, 180 - y);
       context.stroke();
     }
+    if (this.saying) {
+      this.updateBubble();
+    }
   };
 
   Sprite.prototype.dotPen = function() {
@@ -1046,6 +1250,7 @@ var P = (function() {
     if (d > 180) d -= 360;
     if (d <= -180) d += 360;
     this.direction = d;
+    if (this.saying) this.updateBubble();
   };
 
   var collisionCanvas = document.createElement('canvas');
@@ -1068,40 +1273,44 @@ var P = (function() {
       return bounds.left <= -240 || bounds.right >= 240 || bounds.top >= 180 || bounds.bottom <= -180;
     } else {
       if (!this.visible) return false;
-      var sprite = this.stage.getObject(thing);
-      if (!sprite || !sprite.visible) return false;
-      var sc = sprite.costumes[sprite.currentCostumeIndex];
+      var sprites = this.stage.getObjects(thing);
+      for (var i = sprites.length; i--;) {
+        var sprite = sprites[i];
+        if (!sprite.visible) continue;
 
-      var mb = this.rotatedBounds();
-      var ob = sprite.rotatedBounds();
+        var sc = sprite.costumes[sprite.currentCostumeIndex];
 
-      if (mb.bottom >= ob.top || ob.bottom >= mb.top || mb.left >= ob.right || ob.left >= mb.right) {
-        return false;
-      }
+        var mb = this.rotatedBounds();
+        var ob = sprite.rotatedBounds();
 
-      var left = Math.max(mb.left, ob.left);
-      var top = Math.min(mb.top, ob.top);
-      var right = Math.min(mb.right, ob.right);
-      var bottom = Math.max(mb.bottom, ob.bottom);
+        if (mb.bottom >= ob.top || ob.bottom >= mb.top || mb.left >= ob.right || ob.left >= mb.right) {
+          continue;
+        }
 
-      collisionCanvas.width = right - left;
-      collisionCanvas.height = top - bottom;
+        var left = Math.max(mb.left, ob.left);
+        var top = Math.min(mb.top, ob.top);
+        var right = Math.min(mb.right, ob.right);
+        var bottom = Math.max(mb.bottom, ob.bottom);
 
-      collisionContext.save();
-      collisionContext.translate(-(left + 240), -(180 - top));
+        collisionCanvas.width = right - left;
+        collisionCanvas.height = top - bottom;
 
-      this.draw(collisionContext);
-      collisionContext.globalCompositeOperation = 'source-in';
-      sprite.draw(collisionContext);
+        collisionContext.save();
+        collisionContext.translate(-(left + 240), -(180 - top));
 
-      collisionContext.restore();
+        this.draw(collisionContext);
+        collisionContext.globalCompositeOperation = 'source-in';
+        sprite.draw(collisionContext);
 
-      var data = collisionContext.getImageData(0, 0, right - left, top - bottom).data;
+        collisionContext.restore();
 
-      var length = (right - left) * (top - bottom) * 4;
-      for (var i = 0; i < length; i += 4) {
-        if (data[i + 3]) {
-          return true;
+        var data = collisionContext.getImageData(0, 0, right - left, top - bottom).data;
+
+        var length = (right - left) * (top - bottom) * 4;
+        for (var j = 0; j < length; j += 4) {
+          if (data[j + 3]) {
+            return true;
+          }
         }
       }
       return false;
@@ -1127,7 +1336,7 @@ var P = (function() {
     rgb = rgb & 0xffffff;
     var length = (b.right - b.left) * (b.top - b.bottom) * 4;
     for (var i = 0; i < length; i += 4) {
-      if ((data[i] << 16 | data[i + 1] << 8 | data[i + 2]) === rgb) {
+      if ((data[i] << 16 | data[i + 1] << 8 | data[i + 2]) === rgb && data[i + 3]) {
         return true;
       }
     }
@@ -1157,6 +1366,7 @@ var P = (function() {
     }
 
     this.direction = Math.atan2(dy, dx) * 180 / Math.PI + 90;
+    if (this.saying) this.updateBubble();
 
     b = this.rotatedBounds();
     var x = this.scratchX;
@@ -1244,6 +1454,87 @@ var P = (function() {
       y = sprite.scratchY;
     }
     this.direction = Math.atan2(x - this.scratchX, y - this.scratchY) * 180 / Math.PI;
+    if (this.saying) this.updateBubble();
+  };
+
+  Sprite.prototype.say = function(text, thinking) {
+    text = '' + text;
+    if (!text) {
+      this.saying = false;
+      if (!this.bubble) return;
+      this.bubble.style.display = 'none';
+      return ++this.sayId;
+    }
+    this.saying = true;
+    this.thinking = thinking;
+    if (!this.bubble) {
+      this.bubble = document.createElement('div');
+      this.bubble.style.maxWidth = ''+(127/14)+'em';
+      this.bubble.style.minWidth = ''+(48/14)+'em';
+      this.bubble.style.padding = ''+(8/14)+'em '+(10/14)+'em';
+      this.bubble.style.border = ''+(3/14)+'em solid rgb(160, 160, 160)'
+      this.bubble.style.borderRadius = ''+(10/14)+'em'
+      this.bubble.style.background = '#fff';
+      this.bubble.style.position = 'absolute';
+      this.bubble.style.font = 'bold 14em sans-serif';
+      this.bubble.style.whiteSpace = 'pre-wrap';
+      this.bubble.style.wordWrap = 'break-word';
+      this.bubble.style.textAlign = 'center';
+      this.bubble.style.cursor = 'default';
+      this.bubble.appendChild(this.bubbleText = document.createTextNode(''));
+      this.bubble.appendChild(this.bubblePointer = document.createElement('div'));
+      this.bubblePointer.style.position = 'absolute';
+      this.bubblePointer.style.height = ''+(21/14)+'em';
+      this.bubblePointer.style.width = ''+(44/14)+'em';
+      this.bubblePointer.style.background = 'url(icons.svg) '+(-195/14)+'em '+(-4/14)+'em';
+      this.bubblePointer.style.backgroundSize = ''+(320/14)+'em '+(96/14)+'em';
+      this.stage.root.appendChild(this.bubble);
+    }
+    this.bubblePointer.style.backgroundPositionX = ((thinking ? -259 : -195)/14)+'em';
+    this.bubble.style.display = 'block';
+    this.bubbleText.nodeValue = text;
+    this.updateBubble();
+    return ++this.sayId;
+  };
+
+  Sprite.prototype.updateBubble = function() {
+    if (!this.visible || !this.saying) {
+      this.bubble.style.display = 'none';
+      return;
+    }
+    var b = this.rotatedBounds();
+    var left = 240 + b.right;
+    var bottom = 180 + b.top;
+    var width = this.bubble.offsetWidth / this.stage.zoom;
+    var height = this.bubble.offsetHeight / this.stage.zoom;
+    this.bubblePointer.style.top = ((height - 6) / 14) + 'em';
+    if (left + width + 2 > 480) {
+      this.bubble.style.right = ((240 - b.left) / 14) + 'em';
+      this.bubble.style.left = 'auto';
+      this.bubblePointer.style.right = (3/14)+'em';
+      this.bubblePointer.style.left = 'auto';
+      this.bubblePointer.style.backgroundPositionY = (-36/14)+'em';
+    } else {
+      this.bubble.style.left = (left / 14) + 'em';
+      this.bubble.style.right = 'auto';
+      this.bubblePointer.style.left = (3/14)+'em';
+      this.bubblePointer.style.right = 'auto';
+      this.bubblePointer.style.backgroundPositionY = (-4/14)+'em';
+    }
+    if (bottom + height + 2 > 360) {
+      bottom = 360 - height - 2;
+    }
+    if (bottom < 19) {
+      bottom = 19;
+    }
+    this.bubble.style.bottom = (bottom / 14) + 'em';
+  };
+
+  Sprite.prototype.remove = function() {
+    if (this.bubble) {
+      this.stage.root.removeChild(this.bubble);
+      this.bubble = null;
+    }
   };
 
   var Costume = function(data) {
@@ -1328,6 +1619,39 @@ var P = (function() {
         ref.watcher = this;
       }
     }
+    if (!this.label) {
+      this.label = this.getLabel();
+      if (this.target.isSprite) this.label = this.target.objName + ': ' + this.label;
+    }
+  };
+
+  var WATCHER_LABELS = {
+    'costumeIndex': 'costume #',
+    'xpos': 'x position',
+    'ypos': 'y position',
+    'heading': 'direction',
+    'scale': 'size',
+    'backgroundIndex': 'background #',
+    'sceneName': 'background name',
+    'tempo': 'tempo',
+    'volume': 'volume',
+    'answer': 'answer',
+    'timer': 'timer',
+    'soundLevel': 'loudness',
+    'isLoud': 'loud?',
+    'xScroll': 'x scroll',
+    'yScroll': 'y scroll'
+  };
+
+  Watcher.prototype.getLabel = function() {
+    switch (this.cmd) {
+      case 'getVar:': return this.param;
+      case 'sensor:': return this.param + ' sensor value';
+      case 'sensorPressed': return 'sensor ' + this.param + '?';
+      case 'timeAndDate': return this.param;
+      case 'senseVideoMotion': return 'video ' + this.param;
+    }
+    return WATCHER_LABELS[this.cmd] || '';
   };
 
   Watcher.prototype.draw = function(context) {
@@ -1335,7 +1659,7 @@ var P = (function() {
     if (!this.target) return;
     switch (this.cmd) {
       case 'answer':
-        // TODO
+        value = this.stage.answer;
         break;
       case 'backgroundIndex':
         value = this.stage.currentCostumeIndex + 1;
@@ -1364,8 +1688,7 @@ var P = (function() {
         value = this.target.scale * 100;
         break;
       case 'sceneName':
-        ref = this.stage.costumes[this.stage.currentCostumeIndex];
-        if (ref) value = ref.costumeName;
+        value = this.stage.getCostumeName();
         break;
       case 'senseVideoMotion':
         // TODO
@@ -1380,7 +1703,7 @@ var P = (function() {
         value = this.timeAndDate(this.param);
         break;
       case 'timer':
-        value = (this.stage.now - this.stage.timerStart) / 1000;
+        value = Math.round((this.stage.now() - this.stage.timerStart) / 100) / 10;
         break;
       case 'volume':
         // TODO
@@ -1601,7 +1924,8 @@ P.compile = (function() {
       }
     };
 
-    var val = function(e) {
+    var val = function(e, usenum, usebool) {
+      var v;
       if (typeof e === 'number' || typeof e === 'boolean') {
 
         return '' + e;
@@ -1614,7 +1938,64 @@ P.compile = (function() {
           .replace(/\r/g, '\\r')
           .replace(/"/g, '\\"') + '"';
 
-      } else if (e[0] === 'xpos') { /* Motion */
+      } else if ((v = numval(e)) != null || (v = boolval(e)) != null) {
+
+        return v;
+
+      } else if (e[0] === 'costumeName') {
+
+        return 'S.getCostumeName()';
+
+      } else if (e[0] === 'sceneName') {
+
+        return 'self.getCostumeName()';
+
+      } else if (e[0] === 'getParam') { /* Data */
+
+        return '(C && C.args[' + val(e[1]) + '] != null ? C.args[' + val(e[1]) + '] : 0)';
+
+      } else if (e[0] === 'readVariable') {
+
+        return 'getVar(' + val(e[1]) + ').value';
+
+      } else if (e[0] === 'contentsOfList:') {
+
+        return 'contentsOfList(' + val(e[1]) + ')';
+
+      } else if (e[0] === 'getLine:ofList:') {
+
+        return 'getLineOfList(' + val(e[2]) + ', ' + val(e[1]) + ')';
+
+      } else if (e[0] === 'concatenate:with:') {
+
+        return '("" + ' + val(e[1]) + ' + ' + val(e[2]) + ')';
+
+      } else if (e[0] === 'letter:of:') {
+
+        return '(("" + ' + val(e[2]) + ')[Math.floor(' + num(e[1]) + ') - 1] || "")';
+
+      } else if (e[0] === 'answer') { /* Sensing */
+
+        return 'self.answer';
+
+      } else if (e[0] === 'getAttribute:of:') {
+
+        return 'attribute(' + val(e[1]) + ', ' + val(e[2]) + ')';
+
+      // } else if (e[0] === 'getUserId') {
+
+      // } else if (e[0] === 'getUserName') {
+
+      } else {
+
+        warn('Undefined val: ' + e[0]);
+
+      }
+    };
+
+    var numval = function(e) {
+
+      if (e[0] === 'xpos') { /* Motion */
 
         return 'S.scratchX';
 
@@ -1630,21 +2011,13 @@ P.compile = (function() {
 
         return '(S.currentCostumeIndex + 1)';
 
-      } else if (e[0] === 'costumeName') {
-
-        return 'S.getCostumeName()';
-
       } else if (e[0] === 'backgroundIndex') {
 
         return '(self.currentCostumeIndex + 1)';
 
-      } else if (e[0] === 'sceneName') {
-
-        return 'self.getCostumeName()';
-
       } else if (e[0] === 'scale') {
 
-        return 'S.scale';
+        return '(S.scale * 100)';
 
       // } else if (e[0] === 'volume') { /* Sound */
 
@@ -1652,29 +2025,9 @@ P.compile = (function() {
 
         return 'self.tempoBPM';
 
-      } else if (e[0] === 'getParam') { /* Data */
-
-        return '(C && C.args[' + val(e[1]) + '] != null ? C.args[' + val(e[1]) + '] : 0)';
-
-      } else if (e[0] === 'readVariable') {
-
-        return 'S.varRefs[' + val(e[1]) + '].value';
-
-      } else if (e[0] === 'contentsOfList:') {
-
-        return 'contentsOfList(' + val(e[1]) + ')';
-
-      } else if (e[0] === 'getLine:ofList:') {
-
-        return 'getLineOfList(' + val(e[2]) + ', ' + val(e[1]) + ')';
-
-      } else if (e[0] === 'lineCountOfList:') {
+      } else if (e[0] === 'lineCountOfList:') { /* Data */
 
         return 'lineCountOfList(' + val(e[1]) + ')';
-
-      } else if (e[0] === 'list:contains:') {
-
-        return 'listContains(' + val(e[1]) + ', ' + val(e[2]) + ')';
 
       } else if (e[0] === '+') { /* Operators */
 
@@ -1696,7 +2049,68 @@ P.compile = (function() {
 
         return 'random(' + num(e[1]) + ', ' + num(e[2]) + ')';
 
-      } else if (e[0] === '<') {
+      } else if (e[0] === 'abs') {
+
+        return 'Math.abs(' + num(e[1]) + ')';
+
+      } else if (e[0] === 'sqrt') {
+
+        return 'Math.sqrt(' + num(e[1]) + ')';
+
+      } else if (e[0] === 'stringLength:') {
+
+        return '("" + ' + val(e[1]) + ').length';
+
+      } else if (e[0] === '%' || e[0] === '\\') {
+
+        return 'mod(' + num(e[1]) + ', ' + num(e[2]) + ')';
+
+      } else if (e[0] === 'rounded') {
+
+        return 'Math.round(' + num(e[1]) + ')';
+
+      } else if (e[0] === 'computeFunction:of:') {
+
+        return 'mathFunc(' + val(e[1]) + ', ' + num(e[2]) + ')';
+
+      } else if (e[0] === 'mouseX') { /* Sensing */
+
+        return 'self.mouseX';
+
+      } else if (e[0] === 'mouseY') {
+
+        return 'self.mouseY';
+
+      } else if (e[0] === 'timer') {
+
+        return '((self.now() - self.timerStart) / 1000)';
+
+      } else if (e[0] === 'distanceTo:') {
+
+        return 'S.distanceTo(' + val(e[1]) + ')';
+
+      // } else if (e[0] === 'soundLevel') {
+
+      } else if (e[0] === 'timestamp') {
+
+        return '((Date.now() - epoch) / 86400000)';
+
+      } else if (e[0] === 'timeAndDate') {
+
+        return 'timeAndDate(' + val(e[1]) + ')';
+
+      // } else if (e[0] === 'sensor:') {
+
+      }
+    };
+
+    var boolval = function(e) {
+
+      if (e[0] === 'list:contains:') { /* Data */
+
+        return 'listContains(' + val(e[1]) + ', ' + val(e[2]) + ')';
+
+      } else if (e[0] === '<') { /* Operators */
 
         return '(compare(' + val(e[1]) + ', ' + val(e[2]) + ') === -1)';
 
@@ -1720,51 +2134,11 @@ P.compile = (function() {
 
         return '!' + bool(e[1]) + '';
 
-      } else if (e[0] === 'abs') {
-
-        return 'Math.abs(' + num(e[1]) + ')';
-
-      } else if (e[0] === 'sqrt') {
-
-        return 'Math.sqrt(' + num(e[1]) + ')';
-
-      } else if (e[0] === 'concatenate:with:') {
-
-        return '("" + ' + val(e[1]) + ' + ' + val(e[2]) + ')';
-
-      } else if (e[0] === 'letter:of:') {
-
-        return '(("" + ' + val(e[2]) + ')[Math.floor(' + num(e[1]) + ')] || "")';
-
-      } else if (e[0] === 'stringLength:') {
-
-        return '("" + ' + val(e[1]) + ').length';
-
-      } else if (e[0] === '%' || e[0] === '\\') {
-
-        return 'mod(' + num(e[1]) + ', ' + num(e[2]) + ')';
-
-      } else if (e[0] === 'rounded') {
-
-        return 'Math.round(' + num(e[1]) + ')';
-
-      } else if (e[0] === 'computeFunction:of:') {
-
-        return 'mathFunc(' + val(e[1]) + ', ' + num(e[2]) + ')';
-
-      } else if (e[0] === 'mousePressed') {
+      } else if (e[0] === 'mousePressed') { /* Sensing */
 
         return 'self.mousePressed';
 
-      } else if (e[0] === 'mouseX') {
-
-        return 'self.mouseX';
-
-      } else if (e[0] === 'mouseY') {
-
-        return 'self.mouseY';
-
-      } else if (e[0] === 'touching:') { /* Sensing */
+      } else if (e[0] === 'touching:') {
 
         return 'S.touching(' + val(e[1]) + ')';
 
@@ -1774,53 +2148,26 @@ P.compile = (function() {
 
       // } else if (e[0] === 'color:sees:') {
 
-      // } else if (e[0] === 'answer') {
-
-      } else if (e[0] === 'timer') {
-
-        return '(self.now() - self.timerStart) / 1000';
-
       } else if (e[0] === 'keyPressed:') {
 
         return '!!self.keys[P.getKeyCode(' + val(e[1]) + ')]';
 
-      } else if (e[0] === 'distanceTo:') {
-
-        return 'S.distanceTo(' + val(e[1]) + ')';
-
-      } else if (e[0] === 'getAttribute:of:') {
-
-        return 'attribute(' + val(e[1]) + ', ' + val(e[2]) + ')';
-
-      // } else if (e[0] === 'getUserId') {
-
-      // } else if (e[0] === 'getUserName') {
-
-      // } else if (e[0] === 'soundLevel') {
-
       // } else if (e[0] === 'isLoud') {
 
-      } else if (e[0] === 'timestamp') {
-
-        return '((Date.now() - epoch) / 86400000)';
-
-      } else if (e[0] === 'timeAndDate') {
-
-        return 'timeAndDate(' + val(e[1]) + ')';
-
-      // } else if (e[0] === 'sensor:') {
-
       // } else if (e[0] === 'sensorPressed:') {
-
-      } else {
-
-        warn('Undefined val: ' + e[0]);
 
       }
     };
 
     var bool = function(e) {
-      return 'bool(' + val(e) + ')';
+      if (typeof e === 'boolean') {
+        return e;
+      }
+      if (typeof e === 'number' || typeof e === 'string') {
+        return Number(e) !== 0 && e !== '' && e !== 'false' && e !== false;
+      }
+      var v = boolval(e);
+      return v != null ? v : 'bool(' + val(e, false, true) + ')';
     };
 
     var num = function(e) {
@@ -1830,12 +2177,19 @@ P.compile = (function() {
       if (typeof e === 'boolean' || typeof e === 'string') {
         return Number(e) || 0;
       }
-      return '(Number(' + val(e) + ') || 0)';
+      var v = numval(e);
+      return v != null ? v : '(Number(' + val(e, true) + ') || 0)';
     };
 
     var compile = function(block) {
       if (LOG_PRIMITIVES) {
         source += 'console.log(' + val(block[0]) + ');\n';
+      }
+
+      if (['forward:', 'turnRight:', 'turnLeft:', 'heading:', 'pointTowards:', 'gotoX:y:', 'gotoSpriteOrMouse:', 'changeXposBy:', 'xpos:', 'changeYposBy:', 'ypos:', 'bounceOffEdge', 'setRotationStyle', 'lookLike:', 'nextCostume', 'say:duration:elapsed:from:', 'say:', 'think:duration:elapsed:from:', 'think:', 'changeGraphicEffect:by:', 'setGraphicEffect:to:', 'filterReset', 'changeSizeBy:', 'setSizeTo:', 'comeToFront', 'goBackByLayers:', 'glideSecs:toX:y:elapsed:from:'].indexOf(block[0]) > -1) {
+        source += 'if (S.visible) VISUAL = true;\n';
+      } else if (['showBackground:', 'startScene', 'nextBackground', 'nextScene', 'startSceneAndWait', 'show', 'hide', 'putPenDown', 'stampCostume', 'showVariable:', 'hideVariable:', 'doAsk'].indexOf(block[0]) > -1) {
+        source += 'VISUAL = true;\n';
       }
 
       if (block[0] === 'forward:') { /* Motion */
@@ -1919,32 +2273,66 @@ P.compile = (function() {
 
         } else {
 
+          source += 'save();\n';
           source += 'self.setCostume(' + val(block[1]) + ');\n';
           source += 'R.threads = sceneChange();\n';
           var id = label();
           source += 'if (!running(R.threads)) {\n';
           queue(id);
           source += '}\n';
+          source += 'restore();\n';
 
         }
 
-      // } else if (block[0] === 'say:duration:elapsed:from:') {
+      } else if (block[0] === 'say:duration:elapsed:from:') {
+
+        source += 'save();\n';
+        source += 'R.id = S.say(' + val(block[1]) + ', false);\n';
+        source += 'R.start = self.now();\n';
+        source += 'R.duration = ' + num(block[2]) + ';\n';
+
+        var id = label();
+        source += 'if (self.now() - R.start < R.duration * 1000) {\n';
+        queue(id);
+        source += '}\n';
+
+        source += 'if (S.sayId === R.id) {\n';
+        source += '  S.say("");\n';
+        source += '}\n';
+        source += 'restore();\n';
 
       } else if (block[0] === 'say:') {
 
-        source += 'console.log(' + val(block[1]) + ');\n';
+        source += 'S.say(' + val(block[1]) + ', false);\n';
 
-      // } else if (block[0] === 'think:duration:elapsed:from:') {
+      } else if (block[0] === 'think:duration:elapsed:from:') {
 
-      // } else if (block[0] === 'think:') {
+        source += 'save();\n';
+        source += 'R.id = S.say(' + val(block[1]) + ', true);\n';
+        source += 'R.start = self.now();\n';
+        source += 'R.duration = ' + num(block[2]) + ';\n';
+
+        var id = label();
+        source += 'if (self.now() - R.start < R.duration * 1000) {\n';
+        queue(id);
+        source += '}\n';
+
+        source += 'if (S.sayId === R.id) {\n';
+        source += '  S.say("");\n';
+        source += '}\n';
+        source += 'restore();\n';
+
+      } else if (block[0] === 'think:') {
+
+        source += 'S.say(' + val(block[1]) + ', true);\n';
 
       } else if (block[0] === 'changeGraphicEffect:by:') {
 
-        source += 'S.filters[' + val(block[1]) + '] += ' + num(block[2]) + ';\n';
+        source += 'S.changeFilter(' + val(block[1]) + ', ' + num(block[2]) + ');\n';
 
       } else if (block[0] === 'setGraphicEffect:to:') {
 
-        source += 'S.filters[' + val(block[1]) + '] = ' + num(block[2]) + ';\n';
+        source += 'S.setFilter(' + val(block[1]) + ', ' + num(block[2]) + ');\n';
 
       } else if (block[0] === 'filterReset') {
 
@@ -1961,10 +2349,12 @@ P.compile = (function() {
       } else if (block[0] === 'show') {
 
         source += 'S.visible = true;\n';
+        source += 'if (S.saying) S.updateBubble();\n';
 
       } else if (block[0] === 'hide') {
 
         source += 'S.visible = false;\n';
+        source += 'if (S.saying) S.updateBubble();\n';
 
       } else if (block[0] === 'comeToFront') {
 
@@ -2016,7 +2406,8 @@ P.compile = (function() {
 
       } else if (block[0] === 'clearPenTrails') { /* Pen */
 
-        source += 'self.penCanvas.width = 480;\n';
+        source += 'self.penCanvas.width = 480 * self.maxZoom;\n';
+        source += 'self.penContext.scale(self.maxZoom, self.maxZoom);\n';
 
       } else if (block[0] === 'putPenDown') {
 
@@ -2071,11 +2462,11 @@ P.compile = (function() {
 
       } else if (block[0] === 'setVar:to:') { /* Data */
 
-        source += 'if (S.varRefs[' + val(block[1]) + ']) S.varRefs[' + val(block[1]) + '].value = ' + val(block[2]) + ';\n';
+        source += 'getVar(' + val(block[1]) + ').value = ' + val(block[2]) + ';\n';
 
       } else if (block[0] === 'changeVar:by:') {
 
-        source += 'if (S.varRefs[' + val(block[1]) + ']) S.varRefs[' + val(block[1]) + '].value = (Number(S.varRefs[' + val(block[1]) + '].value) || 0) + ' + num(block[2]) + ';\n';
+        source += 'var v = getVar(' + val(block[1]) + '); v.value = (Number(v.value) || 0) + ' + num(block[2]) + ';\n';
 
       } else if (block[0] === 'append:toList:') {
 
@@ -2123,11 +2514,13 @@ P.compile = (function() {
 
       } else if (block[0] === 'doBroadcastAndWait') {
 
+        source += 'save();\n';
         source += 'R.threads = broadcast(' + val(block[1]) + ');\n';
         var id = label();
         source += 'if (running(R.threads)) {\n';
         queue(id);
         source += '}\n';
+        source += 'restore();\n';
 
       } else if (block[0] === 'doForever') {
 
@@ -2161,11 +2554,11 @@ P.compile = (function() {
 
       } else if (block[0] === 'doIfElse') {
 
-        source += 'if (' + bool(block[1]) + ') {';
+        source += 'if (' + bool(block[1]) + ') {\n';
         seq(block[2]);
-        source += '} else {';
+        source += '} else {\n';
         seq(block[3]);
-        source += '}';
+        source += '}\n';
 
       } else if (block[0] === 'doRepeat') {
 
@@ -2174,7 +2567,7 @@ P.compile = (function() {
 
         if (warp) {
 
-          source += 'while (R.count > 0) {\n';
+          source += 'while (R.count >= 0.5) {\n';
           source += '  R.count -= 1;\n';
           seq(block[2]);
           source += '}\n';
@@ -2185,7 +2578,7 @@ P.compile = (function() {
 
           var id = label();
 
-          source += 'if (R.count > 0) {\n';
+          source += 'if (R.count >= 0.5) {\n';
           source += '  R.count -= 1;\n';
           seq(block[2]);
           queue(id);
@@ -2204,7 +2597,7 @@ P.compile = (function() {
 
         if (warp) {
 
-          source += 'if (!' + bool(block[1]) + ') {\n';
+          source += 'while (!' + bool(block[1]) + ') {\n';
           seq(block[2]);
           source += '}\n';
 
@@ -2282,7 +2675,6 @@ P.compile = (function() {
       } else if (block[0] === 'stopAll') {
 
         source += 'self.stopAll();\n';
-        source += 'TERMINATE = true;\n';
         source += 'return;\n';
 
       } else if (block[0] === 'stopScripts') {
@@ -2290,15 +2682,17 @@ P.compile = (function() {
         source += 'switch (' + val(block[1]) + ') {\n';
         source += '  case "all":\n'
         source += '    self.stopAll();\n';
-        source += '    TERMINATE = true;\n';
         source += '    return;\n';
         source += '  case "this script":\n';
         source += '    endCall();\n';
         source += '    return;\n';
         source += '  case "other scripts in sprite":\n';
         source += '  case "other scripts in stage":\n';
-        source += '    S.queue = [];\n';
-        source += '    TERMINATE = true;\n';
+        source += '    for (var i = THREAD + 1; i < self.queue.length; i++) {\n';
+        source += '      if (self.queue[i] && self.queue[i].sprite === S) {\n';
+        source += '        self.queue[i] = undefined;\n';
+        source += '      }\n';
+        source += '    }\n';
         source += '    break;\n';
         source += '}\n';
 
@@ -2307,9 +2701,11 @@ P.compile = (function() {
         source += 'save();\n';
         source += 'R.start = self.now();\n';
         source += 'R.duration = ' + num(block[1]) + ';\n';
+        source += 'R.first = true;\n';
 
         var id = label();
-        source += 'if (self.now() - R.start < R.duration * 1000) {\n';
+        source += 'if (self.now() - R.start < R.duration * 1000 || R.first) {\n';
+        source += '  R.first = false;\n';
         queue(id);
         source += '}\n';
 
@@ -2327,13 +2723,29 @@ P.compile = (function() {
 
       } else if (block[0] === 'deleteClone') {
 
-        source += 'var i = self.children.indexOf(S);\n';
-        source += 'if (i > -1) self.children.splice(i, 1);\n';
-        source += 'S.queue = [];\n';
-        source += 'TERMINATE = true;\n';
-        source += 'return;\n';
+        source += 'if (S.isClone) {\n';
+        source += '  var i = self.children.indexOf(S);\n';
+        source += '  if (i > -1) self.children.splice(i, 1);\n';
+        source += '  S.queue = [];\n';
+        source += '  TERMINATE = true;\n';
+        source += '  return;\n';
+        source += '}\n';
 
-      // } else if (block[0] === 'doAsk') { /* Sensing */
+      } else if (block[0] === 'doAsk') { /* Sensing */
+
+        source += 'R.id = self.nextPromptId++;\n';
+
+        var id = label();
+        source += 'if (self.promptId < R.id) {\n';
+        queue(id);
+        source += '}\n';
+
+        source += 'S.ask(' + val(block[1]) + ');';
+
+        var id = label();
+        source += 'if (self.promptId === R.id) {\n';
+        queue(id);
+        source += '}\n';
 
       } else if (block[0] === 'timerReset') {
 
@@ -2351,7 +2763,7 @@ P.compile = (function() {
     var fns = [0];
     var warp = 0;
 
-    if (script[0][0] === 'procDef') {
+    if (script[0][0] === 'procDef' && script[0][4]) {
       warp += 1;
     }
 
@@ -2462,20 +2874,23 @@ P.compile = (function() {
 P.runtime = (function() {
   'use strict';
 
-  var self, S, R, STACK, C, CALLS, BASE, THREAD, TERMINATE, STOP_THREAD = {};
+  var self, S, R, STACK, C, CALLS, BASE, THREAD, TERMINATE, VISUAL, STOP_THREAD = {};
 
   var bool = function(v) {
     return Number(v) !== 0 && v !== '' && v !== 'false' && v !== false;
   };
 
+  var DIGIT = /\d/;
   var compare = function(x, y) {
-    var nx = Number(x);
-    var ny = Number(y);
-    if (nx === nx && ny === ny) {
-      return nx < ny ? -1 : nx === ny ? 0 : 1;
+    if ((typeof x === 'number' || DIGIT.test(x)) && (typeof y === 'number' || DIGIT.test(y))) {
+      var nx = Number(x);
+      var ny = Number(y);
+      if (nx === nx && ny === ny) {
+        return nx < ny ? -1 : nx === ny ? 0 : 1;
+      }
     }
-    var xs = String(x);
-    var ys = String(y);
+    var xs = String(x).toLowerCase();
+    var ys = String(y).toLowerCase();
     return xs < ys ? -1 : xs === ys ? 0 : 1;
   };
 
@@ -2557,6 +2972,12 @@ P.runtime = (function() {
     return 0;
   };
 
+  var getVar = function(name) {
+    var v = S.varRefs[name];
+    if (!v) S.variables.push(S.varRefs[name] = v = {name: name, value: 0, isPeristent: false});
+    return v;
+  };
+
   var listIndex = function(list, index, length) {
     if (index === 'random' || index === 'any') {
       return Math.floor(Math.random() * length);
@@ -2595,13 +3016,13 @@ P.runtime = (function() {
 
   var listContains = function(name, value) {
     var list = S.listRefs[name];
-    return list ? list.contents.indexOf(value) > -1 : 0;
+    return list ? list.contents.indexOf(String(value)) > -1 : 0;
   };
 
   var appendToList = function(name, value) {
     var list = S.listRefs[name];
     if (list) {
-      list.contents.push(value);
+      list.contents.push(String(value));
     }
   };
 
@@ -2624,9 +3045,9 @@ P.runtime = (function() {
     if (list) {
       var i = listIndex(list, index, list.contents.length + 1);
       if (i === list.contents.length) {
-        list.contents.push(value);
+        list.contents.push(String(value));
       } else if (i > -1) {
-        list.contents.splice(i, 0, value);
+        list.contents.splice(i, 0, String(value));
       }
     }
   };
@@ -2636,7 +3057,7 @@ P.runtime = (function() {
     if (list) {
       var i = listIndex(list, index, list.contents.length);
       if (i > -1) {
-        list.contents[i] = value;
+        list.contents[i] = String(value);
       }
     }
   };
@@ -2644,39 +3065,25 @@ P.runtime = (function() {
   var mathFunc = function(f, x) {
     switch (f) {
       case 'abs':
+        return Math.abs(x);
       case 'floor':
+        return Math.floor(x);
       case 'sqrt':
-        return Math[f](x);
+        return Math.sqrt(x);
       case 'ceiling':
         return Math.ceil(x);
       case 'cos':
-        x = 90 - x;
+        return Math.cos(x * Math.PI / 180);
       case 'sin':
-        // 0 <= x <= 45 for degrees->radians to work well
-        var neg = false;
-        x = x % 360;
-        if (x < 0) x += 360;
-        if (x > 180) {
-          neg = !neg;
-          x -= 180;
-        }
-        if (x > 90) {
-          x = 180 - x;
-        }
-        var z = x > 45 ?
-          Math.cos((90 - x) * Math.PI / 180) :
-          Math.sin(x * Math.PI / 180);
-        return neg ? -z : z;
+        return Math.sin(x * Math.PI / 180);
       case 'tan':
-        x = x % 180;
-        if (x < 0) x += 180;
-        return x > 90 ?
-          -Math.tan((90 - x) * Math.PI / 180) :
-          Math.tan(x * Math.PI / 180);
+        return Math.tan(x * Math.PI / 180);
       case 'asin':
+        return Math.asin(x) * 180 / Math.PI;
       case 'acos':
+        return Math.acos(x) * 180 / Math.PI;
       case 'atan':
-        return Math[f](x) * 180 / Math.PI;
+        return Math.atan(x) * 180 / Math.PI;
       case 'ln':
         return Math.log(x);
       case 'log':
@@ -2751,7 +3158,7 @@ P.runtime = (function() {
     var procedure = S.procedures[spec];
     if (procedure) {
       var args = {};
-      for (var i = 0; i < values.length; i++) {
+      for (var i = values.length; i--;) {
         args[procedure.inputs[i]] = values[i];
       }
       STACK.push(R);
@@ -2792,19 +3199,12 @@ P.runtime = (function() {
     for (var j = 0; j < self.queue.length; j++) {
       if (self.queue[j] && bases.indexOf(self.queue[j].base) !== -1) return true;
     }
-    for (var i = 0; i < self.children.length; i++) {
-      var c = self.children[i];
-      if (c.isSprite) {
-        for (var j = 0; j < c.queue.length; j++) {
-          if (c.queue[j] && bases.indexOf(c.queue[j].base) !== -1) return true;
-        }
-      }
-    }
     return false;
   };
 
   var queue = function(id) {
-    S.queue[THREAD] = {
+    self.queue[THREAD] = {
+      sprite: S,
       base: BASE,
       fn: S.fns[id],
       calls: CALLS
@@ -2821,14 +3221,16 @@ P.runtime = (function() {
       this.queue = [];
     };
 
-    P.Base.prototype.startThread = function(base) {
+    P.Stage.prototype.startThread = function(sprite, base) {
       var thread = {
+        sprite: sprite,
         base: base,
         fn: base,
         calls: [{ args:{}, stack: [{}] }]
       };
       for (var i = 0; i < this.queue.length; i++) {
-        if (this.queue[i] && this.queue[i].base === base) {
+        var q = this.queue[i];
+        if (q && q.sprite === sprite && q.base === base) {
           this.queue[i] = thread;
           if (S === this && THREAD === i) {
             throw STOP_THREAD;
@@ -2848,15 +3250,15 @@ P.runtime = (function() {
       } else if (event === 'whenGreenFlag') {
         threads = sprite.listeners.whenGreenFlag;
       } else if (event === 'whenIReceive') {
-        threads = sprite.listeners.whenIReceive[arg.toLowerCase()]
+        threads = sprite.listeners.whenIReceive[('' + arg).toLowerCase()]
       } else if (event === 'whenKeyPressed') {
         threads = sprite.listeners.whenKeyPressed[arg];
       } else if (event === 'whenSceneStarts') {
-        threads = sprite.listeners.whenSceneStarts[arg.toLowerCase()];
+        threads = sprite.listeners.whenSceneStarts[('' + arg).toLowerCase()];
       }
       if (threads) {
         for (var i = 0; i < threads.length; i++) {
-          sprite.startThread(threads[i]);
+          this.startThread(sprite, threads[i]);
         }
         return threads;
       }
@@ -2864,16 +3266,17 @@ P.runtime = (function() {
     };
 
     P.Stage.prototype.trigger = function(event, arg) {
-      var result = this.triggerFor(this, event, arg);
-      for (var i = 0; i < this.children.length; i++) {
+      var result = [];
+      for (var i = this.children.length; i--;) {
         if (this.children[i].isSprite) {
           result = result.concat(this.triggerFor(this.children[i], event, arg));
         }
       }
-      return result;
+      return result.concat(this.triggerFor(this, event, arg));
     };
 
     P.Stage.prototype.triggerGreenFlag = function() {
+      this.timerStart = this.now();
       this.trigger('whenGreenFlag');
     };
 
@@ -2886,7 +3289,7 @@ P.runtime = (function() {
 
     P.Stage.prototype.pause = function() {
       if (this.interval) {
-        self.baseNow = self.now();
+        this.baseNow = this.now();
         clearInterval(this.interval);
         delete this.interval;
       }
@@ -2894,66 +3297,60 @@ P.runtime = (function() {
     };
 
     P.Stage.prototype.stopAll = function() {
+      this.hidePrompt = false;
+      this.prompter.style.display = 'none';
+      this.promptId = this.nextPromptId = 0;
       this.queue = [];
       this.resetFilters();
       for (var i = 0; i < this.children.length; i++) {
         var c = this.children[i];
         if (c.isClone) {
+          c.remove();
           this.children.splice(i, 1);
           i -= 1;
         } else if (c.isSprite) {
-          c.queue = [];
           c.resetFilters();
+          if (c.saying) c.say('');
         }
-      }
-    };
-
-    P.Stage.prototype.runFor = function(sprite) {
-      S = sprite;
-      var queue = sprite.queue;
-      TERMINATE = false;
-      for (THREAD = 0; THREAD < queue.length; THREAD++) {
-        if (queue[THREAD]) {
-          var fn = queue[THREAD].fn;
-          BASE = queue[THREAD].base;
-          CALLS = queue[THREAD].calls;
-          C = CALLS.pop();
-          STACK = C.stack;
-          R = STACK.pop();
-          queue[THREAD] = undefined;
-          try {
-            fn();
-          } catch (e) {
-            if (e !== STOP_THREAD) throw e;
-            queue[THREAD] = undefined;
-            continue;
-          }
-          STACK.push(R);
-          CALLS.push(C);
-          if (TERMINATE) return;
-        }
-      }
-      for (var i = queue.length; i--;) {
-        if (!queue[i]) queue.splice(i, 1);
       }
     };
 
     P.Stage.prototype.now = function() {
-      return self.baseNow + Date.now() - self.baseTime;
+      return this.baseNow + Date.now() - this.baseTime;
     };
 
     P.Stage.prototype.step = function() {
       try {
         self = this;
+        VISUAL = false;
         var start = Date.now();
         do {
-          this.runFor(this);
-          for (var i = 0; i < this.children.length; i++) {
-            if (this.children[i].isSprite) {
-              this.runFor(this.children[i]);
+          var queue = this.queue;
+          for (THREAD = 0; THREAD < queue.length; THREAD++) {
+            if (queue[THREAD]) {
+              S = queue[THREAD].sprite;
+              var fn = queue[THREAD].fn;
+              BASE = queue[THREAD].base;
+              CALLS = queue[THREAD].calls;
+              C = CALLS.pop();
+              STACK = C.stack;
+              R = STACK.pop();
+              queue[THREAD] = undefined;
+              try {
+                fn();
+              } catch (e) {
+                if (e !== STOP_THREAD) throw e;
+                queue[THREAD] = undefined;
+                continue;
+              }
+              STACK.push(R);
+              CALLS.push(C);
             }
           }
-        } while (self.isTurbo && Date.now() - start < 1000 / this.framerate);
+          for (var i = queue.length; i--;) {
+            if (!queue[i]) queue.splice(i, 1);
+          }
+        } while ((self.isTurbo || !VISUAL) && Date.now() - start < 1000 / this.framerate);
         this.draw();
         S = null;
       } catch (e) {
