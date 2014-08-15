@@ -1004,6 +1004,7 @@ var P = (function() {
     this.canvas.height = 360 * this.zoom;
 
     context.scale(this.zoom, this.zoom);
+    context.imageSmoothingEnabled = false;
     this.drawOn(context);
 
     if (this.hidePrompt) {
