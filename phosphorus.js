@@ -557,6 +557,7 @@ var P = (function() {
   Base.prototype.fromJSON = function(data) {
     this.objName = data.objName;
     this.scripts = data.scripts;
+    this.scriptComments = data.scriptComments;
     this.currentCostumeIndex = data.currentCostumeIndex || 0;
     this.costumes = data.costumes.map(function(d, i) {
       return new Costume(d, i, this);
@@ -1941,7 +1942,9 @@ P.compile = (function() {
   'use strict';
 
   var LOG_PRIMITIVES;
+  var DEBUG;
   // LOG_PRIMITIVES = true;
+  // DEBUG = true;
 
   var EVENT_SELECTORS = [
     'procDef',
@@ -1953,6 +1956,40 @@ P.compile = (function() {
     'whenSceneStarts',
     'whenSensorGreaterThan' // TODO
   ];
+
+  var blockList;
+  var addBlock = function(block) {
+    blockList.push(block);
+    for (var i = 1; i < block.length; i++) {
+      var a = block[i];
+      if (Array.isArray(a)) {
+        if (typeof a[0] === 'string') {
+          addBlock(a);
+        } else {
+          for (var j = 0; j < a.length; j++) {
+            addBlock(a[j]);
+          }
+        }
+      }
+    }
+  };
+
+  var collectComments = function(object) {
+    if (object.scriptComments) {
+      blockList = [];
+      for (var i = 0; i < object.scripts.length; i++) {
+        var s = object.scripts[i][2];
+        for (var j = 0; j < s.length; j++) {
+          addBlock(s[j]);
+        }
+      }
+      for (var i = 0; i < object.scriptComments.length; i++) {
+        var c = object.scriptComments[i];
+        blockList[c[5]].comment = c[6];
+      }
+      blockList = null;
+    }
+  };
 
   var compileScripts = function(object) {
     for (var i = 0; i < object.scripts.length; i++) {
@@ -2301,6 +2338,10 @@ P.compile = (function() {
         source += 'if (S.visible) VISUAL = true;\n';
       } else if (['showBackground:', 'startScene', 'nextBackground', 'nextScene', 'startSceneAndWait', 'show', 'hide', 'putPenDown', 'stampCostume', 'showVariable:', 'hideVariable:', 'doAsk', 'setVolumeTo:', 'changeVolumeBy:', 'setTempoTo:', 'changeTempoBy:'].indexOf(block[0]) > -1) {
         source += 'VISUAL = true;\n';
+      }
+
+      if (DEBUG && block.comment) {
+        source += '// ' + block.comment.replace(/\n/g, '\n// ') + '\n';
       }
 
       if (block[0] === 'forward:') { /* Motion */
@@ -2912,6 +2953,15 @@ P.compile = (function() {
   return function(stage) {
 
     warnings = Object.create(null);
+
+    if (DEBUG) {
+      collectComments(stage);
+      for (var i = 0; i < stage.children.length; i++) {
+        if (!stage.children[i].cmd) {
+          collectComments(stage.children[i]);
+        }
+      }
+    }
 
     compileScripts(stage);
 
