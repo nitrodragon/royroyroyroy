@@ -534,21 +534,12 @@ var P = (function() {
         div.appendChild(svg);
         svg.style.visibility = 'visible';
 
-        // var canvas = document.createElement('canvas');
         var request = new Request;
         var image = new Image;
         svg.style.cssText = '';
         // console.log(md5, 'data:image/svg+xml;base64,' + btoa(div.innerHTML.trim()), 'data:text/plain;base64,' + btoa(source));
-        // canvg(canvas, div.innerHTML.trim(), {
-        //   ignoreMouse: true,
-        //   ignoreAnimation: true,
-        //   ignoreClear: true,
-        //   renderCallback: function() {
-        //     image.src = canvas.toDataURL();
-        //   }
-        // });
         image.crossOrigin = 'anonymous';
-        image.src = 'data:image/svg+xml;base64,' + btoa(source)//div.innerHTML.trim());
+        image.src = 'data:image/svg+xml;base64,' + btoa(div.innerHTML.trim());
         image.onload = function() {
           if (callback) callback(image);
           request.load();
