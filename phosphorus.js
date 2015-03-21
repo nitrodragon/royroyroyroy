@@ -513,8 +513,8 @@ var P = (function() {
     if (ext === 'svg') {
       var cb = function(source) {
         var div = document.createElement('div');
-        div.innerHTML = source;
-        var svg = div.getElementsByTagName('svg')[0];
+        div.innerHTML = source.replace(/(<\/?)svg:/g, '$1');
+        var svg = div.firstElementChild;
         svg.style.visibility = 'hidden';
         svg.style.position = 'absolute';
         svg.style.left = '-10000px';
@@ -534,19 +534,31 @@ var P = (function() {
         div.appendChild(svg);
         svg.style.visibility = 'visible';
 
-        var canvas = document.createElement('canvas');
+        // var canvas = document.createElement('canvas');
+        var request = new Request;
         var image = new Image;
-        callback(image);
-        // svg.style.cssText = '';
-        // console.log(md5, 'data:image/svg+xml;base64,' + btoa(div.innerHTML.trim()));
-        canvg(canvas, div.innerHTML.trim(), {
-          ignoreMouse: true,
-          ignoreAnimation: true,
-          ignoreClear: true,
-          renderCallback: function() {
-            image.src = canvas.toDataURL();
-          }
-        });
+        svg.style.cssText = '';
+        // console.log(md5, 'data:image/svg+xml;base64,' + btoa(div.innerHTML.trim()), 'data:text/plain;base64,' + btoa(source));
+        // canvg(canvas, div.innerHTML.trim(), {
+        //   ignoreMouse: true,
+        //   ignoreAnimation: true,
+        //   ignoreClear: true,
+        //   renderCallback: function() {
+        //     image.src = canvas.toDataURL();
+        //   }
+        // });
+        image.crossOrigin = 'anonymous';
+        image.src = 'data:image/svg+xml;base64,' + btoa(source)//div.innerHTML.trim());
+        image.onload = function() {
+          if (callback) callback(image);
+          request.load();
+        };
+        image.onerror = function(e) {
+          console.error(e, image);
+          console.log(image.src);
+          request.error(new Error());
+        };
+        IO.projectRequest.add(request);
       };
       if (IO.zip) {
         cb(f.asText());
