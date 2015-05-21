@@ -466,7 +466,19 @@ var P = (function() {
   };
 
   IO.fixSVG = function(svg, element) {
-    if (element.nodeType !== 1) return;
+    if (element.nodeType !== 1) return element;
+    if (element.nodeName.slice(0, 4).toLowerCase() === 'svg:') {
+      var newElement = document.createElementNS('http://www.w3.org/2000/svg', element.localName);
+      var attributes = element.attributes;
+      var newAttributes = newElement.attributes;
+      for (var i = attributes.length; i--;) {
+        newAttributes.setNamedItemNS(attributes[i].cloneNode());
+      }
+      while (element.firstChild) {
+        newElement.appendChild(element.firstChild);
+      }
+      element = newElement;
+    }
     if (element.nodeName === 'text') {
       var font = element.getAttribute('font-family') || '';
       font = IO.FONTS[font] || font;
@@ -501,7 +513,13 @@ var P = (function() {
       element.setAttribute('x', 0);
       element.setAttribute('y', 0);
     }
-    [].forEach.call(element.childNodes, IO.fixSVG.bind(null, svg));
+    [].forEach.call(element.childNodes, function(child) {
+      var newChild = IO.fixSVG(svg, child);
+      if (newChild !== child) {
+        element.replaceChild(newChild, child);
+      }
+    });
+    return element;
   };
 
   IO.loadMD5 = function(md5, id, callback, isAudio) {
@@ -512,9 +530,9 @@ var P = (function() {
     var ext = md5.split('.').pop();
     if (ext === 'svg') {
       var cb = function(source) {
-        var div = document.createElement('div');
-        div.innerHTML = source.replace(/(<\/?)svg:/g, '$1');
-        var svg = div.firstElementChild;
+        var svg = new DOMParser().parseFromString(source, 'image/svg+xml').firstElementChild;
+        svg = IO.fixSVG(svg, svg);
+
         svg.style.visibility = 'hidden';
         svg.style.position = 'absolute';
         svg.style.left = '-10000px';
@@ -522,31 +540,25 @@ var P = (function() {
         document.body.appendChild(svg);
         var viewBox = svg.viewBox.baseVal;
         if (viewBox && (viewBox.x || viewBox.y)) {
-          svg.width.baseVal.value = viewBox.width - viewBox.x;
-          svg.height.baseVal.value = viewBox.height - viewBox.y;
-          viewBox.x = 0;
-          viewBox.y = 0;
-          viewBox.width = 0;
-          viewBox.height = 0;
+          var bb = svg.getBBox();
+          viewBox.width = svg.width.baseVal.value = Math.ceil(bb.x + bb.width + 10);
+          viewBox.height = svg.height.baseVal.value = Math.ceil(bb.y + bb.height + 10);
         }
-        IO.fixSVG(svg, svg);
-        while (div.firstChild) div.removeChild(div.lastChild);
-        div.appendChild(svg);
-        svg.style.visibility = 'visible';
+        svg.style.cssText = '';
+        // document.body.removeChild(svg);
 
         var request = new Request;
         var image = new Image;
-        svg.style.cssText = '';
-        // console.log(md5, 'data:image/svg+xml;base64,' + btoa(div.innerHTML.trim()), 'data:text/plain;base64,' + btoa(source));
-        image.crossOrigin = 'anonymous';
-        image.src = 'data:image/svg+xml;base64,' + btoa(div.innerHTML.trim());
+        var newSource = new XMLSerializer().serializeToString(svg)
+        svg.id = 'svg' + Math.random();
+        // console.log(md5, 'data:image/svg+xml;base64,' + btoa(source), 'data:image/svg+xml;base64,' + btoa(newSource));
+        image.src = 'data:image/svg+xml;base64,' + btoa(newSource);
         image.onload = function() {
           if (callback) callback(image);
           request.load();
         };
         image.onerror = function(e) {
-          console.error(e, image);
-          console.log(image.src);
+          console.error(md5, image.src);
           request.error(new Error());
         };
         IO.projectRequest.add(request);
